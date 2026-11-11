@@ -1,4 +1,8 @@
-#![feature(box_patterns)]
+// feature has been removed science 1.100.0
+// #![feature(box_patterns)]
+
+#![feature(deref_patterns)]
+
 
 #[cfg(feature = "binary-ir")]
 pub mod binary;
