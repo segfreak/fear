@@ -62,10 +62,8 @@ pub enum FearLinkage {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub enum FearBackend {
-    /// default backend
+    FearBackendDummy,
     FearBackendCranelift,
-    /// not yet implemented
-    FearBackendSelf,
     FearBackendLlvm,
 }
 
@@ -79,6 +77,10 @@ pub enum FearIntCmp {
     FearIntCmpLe,
     FearIntCmpGt,
     FearIntCmpGe,
+    FearIntCmpULt,
+    FearIntCmpULe,
+    FearIntCmpUGt,
+    FearIntCmpUGe,
 }
 
 /// Float compare predicate
@@ -118,6 +120,22 @@ impl From<FearType> for Type {
     }
 }
 
+impl From<Type> for FearType {
+    fn from(t: Type) -> Self {
+        match t {
+            Type::Void => FearType::FearVoid,
+            Type::Int1 => FearType::FearBool,
+            Type::Int8 => FearType::FearInt8,
+            Type::Int16 => FearType::FearInt16,
+            Type::Int32 => FearType::FearInt32,
+            Type::Int64 => FearType::FearInt64,
+            Type::Float32 => FearType::FearFloat32,
+            Type::Float64 => FearType::FearFloat64,
+            Type::Pointer => FearType::FearPointer,
+        }
+    }
+}
+
 impl From<FearOptLevel> for OptLevel {
     fn from(t: FearOptLevel) -> Self {
         match t {
@@ -148,6 +166,7 @@ impl From<FearLinkage> for Linkage {
     }
 }
 
+#[allow(unreachable_patterns, unused)]
 impl From<FearBackend> for Backend {
     fn from(t: FearBackend) -> Self {
         match t {
@@ -155,15 +174,15 @@ impl From<FearBackend> for Backend {
             FearBackend::FearBackendCranelift => Backend::Cranelift,
             #[cfg(feature = "llvm")]
             FearBackend::FearBackendLlvm => Backend::Llvm,
-            FearBackend::FearBackendSelf => Backend::Fear,
             _ => {
-                log::warn!("unsupported backend, fallback into Backend::Fear");
-                Backend::Fear
+                log::warn!("unsupported backend, fallback into Backend::Dummy");
+                Backend::Dummy
             }
         }
     }
 }
 
+#[allow(unreachable_patterns, unused)]
 impl From<Backend> for FearBackend {
     fn from(t: Backend) -> Self {
         match t {
@@ -171,7 +190,7 @@ impl From<Backend> for FearBackend {
             Backend::Cranelift => FearBackend::FearBackendCranelift,
             #[cfg(feature = "llvm")]
             Backend::Llvm => FearBackend::FearBackendLlvm,
-            Backend::Fear => FearBackend::FearBackendSelf,
+            Backend::Dummy => FearBackend::FearBackendDummy,
         }
     }
 }
@@ -185,6 +204,10 @@ impl From<FearIntCmp> for IntCmp {
             FearIntCmp::FearIntCmpLe => IntCmp::Le,
             FearIntCmp::FearIntCmpGt => IntCmp::Gt,
             FearIntCmp::FearIntCmpGe => IntCmp::Ge,
+            FearIntCmp::FearIntCmpULt => IntCmp::ULt,
+            FearIntCmp::FearIntCmpULe => IntCmp::ULe,
+            FearIntCmp::FearIntCmpUGt => IntCmp::UGt,
+            FearIntCmp::FearIntCmpUGe => IntCmp::UGe,
         }
     }
 }

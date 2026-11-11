@@ -19,6 +19,9 @@ impl FunctionDef {
             ExprKind::Square(a) => {
                 format!("({}.square {})", ty, Self::fmt_expr(a))
             }
+            ExprKind::Neg(a) => {
+                format!("({}.neg {})", ty, Self::fmt_expr(a))
+            }
             ExprKind::Div(signed, a, b) => {
                 format!(
                     "({}.{}div {} {})",
@@ -51,6 +54,9 @@ impl FunctionDef {
             }
             ExprKind::FRem(a, b) => {
                 format!("({}.rem {} {})", ty, Self::fmt_expr(a), Self::fmt_expr(b))
+            }
+            ExprKind::FNeg(a) => {
+                format!("({}.neg {})", ty, Self::fmt_expr(a))
             }
             ExprKind::FSquare(a) => {
                 format!("({}.square {})", ty, Self::fmt_expr(a))
@@ -139,6 +145,14 @@ impl FunctionDef {
                     }
                 )
             }
+            ExprKind::Undef => format!("({}.undef)", ty),
+            ExprKind::Select(c, t, e) => format!(
+                "(select.{} {} {} {})",
+                ty,
+                Self::fmt_expr(c),
+                Self::fmt_expr(t),
+                Self::fmt_expr(e)
+            ),
         }
     }
 

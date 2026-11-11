@@ -19,6 +19,25 @@ fn normalize_expr(expr: Expr, changed: &mut bool) -> Expr {
         | ExprKind::Alloca(_)
         | ExprKind::NAlloca(_, _) => expr.kind,
 
+        ExprKind::Neg(a) => {
+            let a = normalize_expr(*a, changed);
+            ExprKind::Neg(Box::new(a))
+        }
+
+        ExprKind::FNeg(a) => {
+            let a = normalize_expr(*a, changed);
+            ExprKind::Neg(Box::new(a))
+        }
+
+        ExprKind::Undef => expr.kind,
+
+        ExprKind::Select(c, t, e) => {
+            let c = normalize_expr(*c, changed);
+            let t = normalize_expr(*t, changed);
+            let e = normalize_expr(*e, changed);
+            ExprKind::Select(Box::new(c), Box::new(t), Box::new(e))
+        }
+
         ExprKind::Cast(kind, a) => {
             let a = normalize_expr(*a, changed);
             ExprKind::Cast(kind, Box::new(a))

@@ -152,6 +152,26 @@ fn rewrite(
         | ExprKind::Alloca(_)
         | ExprKind::NAlloca(_, _) => expr,
 
+        ExprKind::Undef => expr,
+
+        ExprKind::Neg(a) => {
+            let a = rewrite(m, func, bid, *a.clone(), cnt, memo, new_values, changed);
+            let new_expr = Expr {
+                ty,
+                kind: ExprKind::Neg(Box::new(a)),
+            };
+            hoist_if_needed(func, new_expr, cnt, memo, new_values, changed)
+        }
+
+        ExprKind::FNeg(a) => {
+            let a = rewrite(m, func, bid, *a.clone(), cnt, memo, new_values, changed);
+            let new_expr = Expr {
+                ty,
+                kind: ExprKind::FNeg(Box::new(a)),
+            };
+            hoist_if_needed(func, new_expr, cnt, memo, new_values, changed)
+        }
+
         ExprKind::Cast(kind, a) => {
             let a = rewrite(m, func, bid, *a.clone(), cnt, memo, new_values, changed);
             let new_expr = Expr {
@@ -429,6 +449,17 @@ fn rewrite(
             let new_expr = Expr {
                 ty,
                 kind: ExprKind::FCmp(*kind, Box::new(a), Box::new(b)),
+            };
+            hoist_if_needed(func, new_expr, cnt, memo, new_values, changed)
+        }
+
+        ExprKind::Select(c, t, e) => {
+            let c = rewrite(m, func, bid, *c.clone(), cnt, memo, new_values, changed);
+            let t = rewrite(m, func, bid, *t.clone(), cnt, memo, new_values, changed);
+            let e = rewrite(m, func, bid, *e.clone(), cnt, memo, new_values, changed);
+            let new_expr = Expr {
+                ty,
+                kind: ExprKind::Select(Box::new(c), Box::new(t), Box::new(e)),
             };
             hoist_if_needed(func, new_expr, cnt, memo, new_values, changed)
         }

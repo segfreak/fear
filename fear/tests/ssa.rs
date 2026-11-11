@@ -8,15 +8,15 @@ use fear::{binary, compiler::CompilerConfig, ssa::*, types::*};
 
 fn foo_def() -> FunctionDef {
     let mut fun = FunctionDef::new();
-    let b0 = fun.entry;
+    let b0 = fun.get_entry();
     let a0 = fun.add_param(Type::Int32);
     let a1 = fun.add_param(Type::Int32);
-    let v0 = fun.make_iconst(b0, Type::Int32, 42);
-    let v1 = fun.make_iconst(b0, Type::Int32, 2);
-    let v2 = fun.make_mul(b0, fun.get_type(v0), v0, v1);
-    let v3 = fun.make_div(b0, true, fun.get_type(v2), v2, a0);
-    let v4 = fun.make_sub(b0, fun.get_type(v2), v3, a0);
-    let v5 = fun.make_sub(b0, fun.get_type(v2), v4, a1);
+    let v0 = fun.make_int_const(b0, Type::Int32, 42);
+    let v1 = fun.make_int_const(b0, Type::Int32, 2);
+    let v2 = fun.make_int_mul(b0, fun.get_type_of(v0), v0, v1);
+    let v3 = fun.make_int_div(b0, true, fun.get_type_of(v2), v2, a0);
+    let v4 = fun.make_int_sub(b0, fun.get_type_of(v2), v3, a0);
+    let v5 = fun.make_int_sub(b0, fun.get_type_of(v2), v4, a1);
     fun.make_ret(b0, Some(v5));
     fun
 }
@@ -24,17 +24,17 @@ fn foo_def() -> FunctionDef {
 fn bar_def(mfoo: FuncId) -> FunctionDef {
     let mut fun = FunctionDef::new();
     let _a0 = fun.add_param(Type::Int32);
-    let b0 = fun.entry;
-    let v0 = fun.make_iconst(b0, Type::Int32, 42);
-    let v1 = fun.make_iconst(b0, Type::Int32, 2);
-    let v2 = fun.make_mul(b0, fun.get_type(v0), v0, v1);
-    let v3 = fun.make_div(b0, true, fun.get_type(v2), v2, v0);
-    let b1 = fun.new_block();
+    let b0 = fun.get_entry();
+    let v0 = fun.make_int_const(b0, Type::Int32, 42);
+    let v1 = fun.make_int_const(b0, Type::Int32, 2);
+    let v2 = fun.make_int_mul(b0, fun.get_type_of(v0), v0, v1);
+    let v3 = fun.make_int_div(b0, true, fun.get_type_of(v2), v2, v0);
+    let b1 = fun.create_block();
     fun.make_jump(b0, b1, vec![v3]);
     let v4 = fun.add_block_param(b1, Type::Int32);
-    let v5 = fun.make_iconst(b1, Type::Int32, 2);
+    let v5 = fun.make_int_const(b1, Type::Int32, 2);
     let v6 = fun.make_call(b1, Type::Int32, mfoo, vec![v4, v5]);
-    let v7 = fun.make_mul(b1, Type::Int32, v5, v6);
+    let v7 = fun.make_int_mul(b1, Type::Int32, v5, v6);
     fun.make_ret(b1, Some(v7));
 
     fun
@@ -42,12 +42,12 @@ fn bar_def(mfoo: FuncId) -> FunctionDef {
 
 fn baz_def() -> FunctionDef {
     let mut fun = FunctionDef::new();
-    let b0 = fun.entry;
+    let b0 = fun.get_entry();
     let v0 = fun.make_alloca(b0, Type::Int32);
     fun.make_alloca(b0, Type::Int32);
 
-    let v2 = fun.make_iconst(b0, Type::Int32, 42);
-    let v3 = fun.make_iconst(b0, Type::Int32, 42 * 2);
+    let v2 = fun.make_int_const(b0, Type::Int32, 42);
+    let v3 = fun.make_int_const(b0, Type::Int32, 42 * 2);
 
     fun.make_store(b0, false, v0, v2);
     fun.make_store(b0, false, v0, v3);
@@ -58,33 +58,33 @@ fn baz_def() -> FunctionDef {
 fn opt_def() -> FunctionDef {
     let mut fdef = FunctionDef::new();
 
-    let entry = fdef.entry;
+    let entry = fdef.get_entry();
 
     let x = fdef.add_param(Type::Int32);
 
     // x * 2
-    let two = fdef.make_iconst(entry, Type::Int32, 2);
-    let x2 = fdef.make_mul(entry, Type::Int32, x, two);
+    let two = fdef.make_int_const(entry, Type::Int32, 2);
+    let x2 = fdef.make_int_mul(entry, Type::Int32, x, two);
 
     // (x * 2) + 0  -> dead + folding target
-    let zero = fdef.make_iconst(entry, Type::Int32, 0);
-    let x2_plus0 = fdef.make_add(entry, Type::Int32, x2, zero);
+    let zero = fdef.make_int_const(entry, Type::Int32, 0);
+    let x2_plus0 = fdef.make_int_add(entry, Type::Int32, x2, zero);
 
     // condition: (x * 2 + 0) > 10
-    let ten = fdef.make_iconst(entry, Type::Int32, 10);
-    let cond = fdef.make_cmp(entry, IntCmp::Gt, x2_plus0, ten);
+    let ten = fdef.make_int_const(entry, Type::Int32, 10);
+    let cond = fdef.make_int_cmp(entry, IntCmp::Gt, x2_plus0, ten);
 
-    let then_bb = fdef.new_block();
-    let else_bb = fdef.new_block();
+    let then_bb = fdef.create_block();
+    let else_bb = fdef.create_block();
 
     // THEN: (x * 2) + (x * 2)
-    let then_x2_a = fdef.make_mul(then_bb, Type::Int32, x, two);
-    let then_x2_b = fdef.make_mul(then_bb, Type::Int32, x, two);
-    let then_res = fdef.make_add(then_bb, Type::Int32, then_x2_a, then_x2_b);
+    let then_x2_a = fdef.make_int_mul(then_bb, Type::Int32, x, two);
+    let then_x2_b = fdef.make_int_mul(then_bb, Type::Int32, x, two);
+    let then_res = fdef.make_int_add(then_bb, Type::Int32, then_x2_a, then_x2_b);
     fdef.make_ret(then_bb, Some(then_res));
 
     // ELSE: x * 2
-    let else_x2 = fdef.make_mul(else_bb, Type::Int32, x, two);
+    let else_x2 = fdef.make_int_mul(else_bb, Type::Int32, x, two);
     fdef.make_ret(else_bb, Some(else_x2));
 
     // entry jump
@@ -95,19 +95,19 @@ fn opt_def() -> FunctionDef {
 
 fn fib_def(fib_id: FuncId) -> FunctionDef {
     let mut f = FunctionDef::new();
-    let entry = f.entry;
+    let entry = f.get_entry();
 
     // param n
     let n = f.add_param(Type::Int32);
 
     // const 1
-    let one = f.make_iconst(entry, Type::Int32, 1);
+    let one = f.make_int_const(entry, Type::Int32, 1);
 
     // n <= 1
-    let cond = f.make_cmp(entry, IntCmp::Le, n, one);
+    let cond = f.make_int_cmp(entry, IntCmp::Le, n, one);
 
-    let then_bb = f.new_block();
-    let else_bb = f.new_block();
+    let then_bb = f.create_block();
+    let else_bb = f.create_block();
 
     // if (n <= 1) goto then else else
     f.make_jumpif(entry, cond, then_bb, vec![], else_bb, vec![]);
@@ -117,16 +117,16 @@ fn fib_def(fib_id: FuncId) -> FunctionDef {
 
     // ELSE:
     // n - 1
-    let n_minus_1 = f.make_sub(else_bb, Type::Int32, n, one);
+    let n_minus_1 = f.make_int_sub(else_bb, Type::Int32, n, one);
     let call_fib_1 = f.make_call(else_bb, Type::Int32, fib_id, vec![n_minus_1]);
 
     // n - 2
-    let two = f.make_iconst(else_bb, Type::Int32, 2);
-    let n_minus_2 = f.make_sub(else_bb, Type::Int32, n, two);
+    let two = f.make_int_const(else_bb, Type::Int32, 2);
+    let n_minus_2 = f.make_int_sub(else_bb, Type::Int32, n, two);
     let call_fib_2 = f.make_call(else_bb, Type::Int32, fib_id, vec![n_minus_2]);
 
     // fib(n-1) + fib(n-2)
-    let sum = f.make_add(else_bb, Type::Int32, call_fib_1, call_fib_2);
+    let sum = f.make_int_add(else_bb, Type::Int32, call_fib_1, call_fib_2);
 
     f.make_ret(else_bb, Some(sum));
 
@@ -136,25 +136,25 @@ fn fib_def(fib_id: FuncId) -> FunctionDef {
 // tail-recursive factorial
 fn fact_tr_def(fact_id: FuncId) -> FunctionDef {
     let mut f = FunctionDef::new();
-    let entry = f.entry;
+    let entry = f.get_entry();
 
     let n = f.add_param(Type::Int32);
     let acc = f.add_param(Type::Int32);
 
-    let one = f.make_iconst(entry, Type::Int32, 1);
+    let one = f.make_int_const(entry, Type::Int32, 1);
 
-    let cond = f.make_cmp(entry, IntCmp::Le, n, one);
+    let cond = f.make_int_cmp(entry, IntCmp::Le, n, one);
 
-    let then_bb = f.new_block();
-    let else_bb = f.new_block();
+    let then_bb = f.create_block();
+    let else_bb = f.create_block();
 
     f.make_jumpif(entry, cond, then_bb, vec![], else_bb, vec![]);
 
     f.make_ret(then_bb, Some(acc));
 
-    let n_minus_1 = f.make_sub(else_bb, Type::Int32, n, one);
+    let n_minus_1 = f.make_int_sub(else_bb, Type::Int32, n, one);
 
-    let acc_mul_n = f.make_mul(else_bb, Type::Int32, acc, n);
+    let acc_mul_n = f.make_int_mul(else_bb, Type::Int32, acc, n);
 
     let call_res = f.make_call(else_bb, Type::Int32, fact_id, vec![n_minus_1, acc_mul_n]);
 
@@ -165,19 +165,31 @@ fn fact_tr_def(fact_id: FuncId) -> FunctionDef {
 
 fn example1_def() -> FunctionDef {
     let mut f = FunctionDef::new();
-    let entry = f.entry;
+    let entry = f.get_entry();
 
-    let then_bb = f.new_block();
-    let else_bb = f.new_block();
+    let then_bb = f.create_block();
+    let else_bb = f.create_block();
 
-    let zero = f.make_iconst(entry, Type::Int32, 0);
-    let one = f.make_iconst(entry, Type::Int32, 1);
+    let zero = f.make_int_const(entry, Type::Int32, 0);
+    let one = f.make_int_const(entry, Type::Int32, 1);
 
-    let cond = f.make_cmp(entry, IntCmp::Lt, zero, one);
+    let cond = f.make_int_cmp(entry, IntCmp::Lt, zero, one);
     f.make_jumpif(entry, cond, then_bb, vec![], else_bb, vec![]);
 
     f.make_ret(then_bb, Some(one));
     f.make_ret(else_bb, Some(zero));
+
+    f
+}
+
+fn min_def() -> FunctionDef {
+    let mut f = FunctionDef::new();
+    let entry = f.get_entry();
+    let left = f.add_param(Type::Int32);
+    let right = f.add_param(Type::Int32);
+    let lt = f.make_int_cmp(entry, IntCmp::Lt, left, right);
+    let value = f.make_select(entry, Type::Int32, lt, left, right);
+    f.make_ret(entry, Some(value));
 
     f
 }
@@ -229,6 +241,12 @@ fn test() {
         Linkage::default(),
         CallingConvention::default(),
     );
+    let mmin = m.declare_function(
+        "min",
+        FunctionSignature::new(vec![Type::Int32, Type::Int32], Type::Int32),
+        Linkage::default(),
+        CallingConvention::default(),
+    );
     m.define_function(mfoo, foo_def())
         .expect("define_function error");
     m.define_function(mbar, bar_def(mfoo))
@@ -242,6 +260,8 @@ fn test() {
     m.define_function(mfact_tr, fact_tr_def(mfact_tr))
         .expect("define_function error");
     m.define_function(mexample1, example1_def())
+        .expect("define_function error");
+    m.define_function(mmin, min_def())
         .expect("define_function error");
     m.verify().expect("pre-opt verify error");
     fs::write("preopt-fear.dot", m.dump_dot()).expect("fs::write error");
@@ -259,6 +279,8 @@ fn test() {
             fear::compiler::OutputType::Object,
             target_lexicon::Triple::host(),
             OptLevel::None,
+            true,
+            None,
         );
         let file = File::create("fear.o").unwrap();
         let writer = BufWriter::new(file);

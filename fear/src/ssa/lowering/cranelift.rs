@@ -5,6 +5,7 @@ use cranelift::codegen::isa::{CallConv, TargetIsa};
 use cranelift::prelude::*;
 use cranelift_module::{Linkage as CLinkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use target_lexicon::Triple;
 
 use crate::ssa::*;
 use crate::types::{
@@ -13,12 +14,26 @@ use crate::types::{
 
 use std::collections::HashMap;
 
-fn pointer_type() -> types::Type {
-    // todo: get pointer type
-    types::I64
+fn select_int(width: u8) -> types::Type {
+    match width {
+        8 => types::I8,
+        16 => types::I16,
+        32 => types::I32,
+        64 => types::I64,
+        128 => types::I128,
+        _ => panic!("unsupported integer"),
+    }
 }
 
-fn map_type(ty: Type) -> types::Type {
+fn pointer_type(triple: &Triple) -> types::Type {
+    let ptr_width = triple
+        .architecture
+        .pointer_width()
+        .unwrap_or(target_lexicon::PointerWidth::U64);
+    select_int(ptr_width.bits())
+}
+
+fn map_type(triple: &Triple, ty: Type) -> types::Type {
     match ty {
         // cranelift has no int1 type
         Type::Int1 => types::I8,
@@ -29,16 +44,24 @@ fn map_type(ty: Type) -> types::Type {
         Type::Float32 => types::F32,
         Type::Float64 => types::F64,
         //
-        Type::Pointer => pointer_type(),
+        Type::Pointer => pointer_type(triple),
         Type::Void => panic!("void has no Cranelift type"),
     }
 }
 
-fn map_linkage(l: &Linkage) -> CLinkage {
-    match l {
-        Linkage::External => CLinkage::Export,
-        Linkage::Internal => CLinkage::Local,
-        Linkage::Weak => CLinkage::Preemptible,
+fn map_linkage(func: &crate::ssa::Function) -> CLinkage {
+    match (&func.linkage, func.get_definition().is_some()) {
+        (Linkage::External, true) => CLinkage::Export,
+        (Linkage::External, false) => CLinkage::Import,
+
+        (Linkage::Internal, true) => CLinkage::Local,
+        (Linkage::Internal, false) => {
+            log::warn!("undefined internal function");
+            CLinkage::Import
+        }
+
+        (Linkage::Weak, true) => CLinkage::Preemptible,
+        (Linkage::Weak, false) => CLinkage::Import,
     }
 }
 
@@ -82,6 +105,7 @@ fn map_float_cond(kind: FloatCmp) -> FloatCC {
 }
 
 pub struct CraneliftLowerer {
+    pub triple: Triple,
     pub module: ObjectModule,
 
     functions: HashMap<FuncId, cranelift_module::FuncId>,
@@ -90,12 +114,14 @@ pub struct CraneliftLowerer {
 impl CraneliftLowerer {
     pub fn new(
         name: &str,
+        triple: Triple,
         isa: Arc<dyn TargetIsa>,
         libcall_names: Box<dyn Fn(LibCall) -> String + Send + Sync>,
     ) -> Self {
         let builder = ObjectBuilder::new(isa, name, libcall_names).unwrap();
         let module = ObjectModule::new(builder);
         Self {
+            triple,
             module,
             functions: HashMap::new(),
         }
@@ -123,10 +149,11 @@ impl CraneliftLowerer {
         let call_conv = self.map_callconv(&self.module.target_config(), callconv);
         let mut s = Signature::new(call_conv);
         for &p in &sig.params {
-            s.params.push(AbiParam::new(map_type(p)));
+            s.params.push(AbiParam::new(map_type(&self.triple, p)));
         }
         if sig.returns != Type::Void {
-            s.returns.push(AbiParam::new(map_type(sig.returns)));
+            s.returns
+                .push(AbiParam::new(map_type(&self.triple, sig.returns)));
         }
         s
     }
@@ -150,7 +177,7 @@ impl CraneliftLowerer {
         let sig = self.make_signature(func.calling_convention, &func.signature);
         let cl_fid = self
             .module
-            .declare_function(&func.name, map_linkage(&func.linkage), &sig)
+            .declare_function(&func.name, map_linkage(func), &sig)
             .unwrap();
         self.functions.insert(fid, cl_fid);
     }
@@ -179,8 +206,8 @@ impl CraneliftLowerer {
         let mut values: HashMap<ValueId, cranelift::prelude::Value> = HashMap::new();
         let mut blocks: HashMap<BlockId, cranelift::prelude::Block> = HashMap::new();
 
-        let entry = def.entry;
-        for &bid in def.blocks.keys() {
+        let entry = def.get_entry();
+        for bid in def.get_block_ids() {
             let cl_block = fx.create_block();
             blocks.insert(bid, cl_block);
         }
@@ -191,35 +218,35 @@ impl CraneliftLowerer {
             fx.switch_to_block(entry_block);
             fx.seal_block(entry_block);
 
-            let entry_ir = &def.blocks[&entry];
+            let entry_ir = def.get_block(entry).unwrap();
             for (i, &param_val) in entry_ir.params.iter().enumerate() {
                 let cl_val = fx.block_params(entry_block)[i];
                 values.insert(param_val, cl_val);
             }
         }
 
-        for (&bid, block) in &def.blocks {
+        for (&bid, block) in def.get_blocks() {
             if bid == entry {
                 continue;
             }
             let cl_block = blocks[&bid];
             for &param in &block.params {
-                let ty = def.get_type(param);
-                let cl_val = fx.append_block_param(cl_block, map_type(ty));
+                let ty = def.get_type_of(param);
+                let cl_val = fx.append_block_param(cl_block, map_type(&self.triple, ty));
                 values.insert(param, cl_val);
             }
         }
 
-        let order: Vec<BlockId> = def.reverse_post_order();
+        let order: Vec<BlockId> = def.compute_rpo();
 
         for &bid in &order {
             if bid != entry {
                 fx.switch_to_block(blocks[&bid]);
             }
 
-            let block = &def.blocks[&bid];
+            let block = def.get_block(bid).unwrap();
             for &inst_id in &block.insts {
-                let inst = &def.insts[&inst_id];
+                let inst = def.get_inst(inst_id).unwrap();
                 compile_inst(
                     def,
                     inst,
@@ -228,11 +255,12 @@ impl CraneliftLowerer {
                     &blocks,
                     &self.functions,
                     &func_refs,
+                    &self.triple,
                 );
             }
         }
 
-        for &bid in def.blocks.keys() {
+        for bid in def.get_block_ids() {
             if bid != entry {
                 fx.seal_block(blocks[&bid]);
             }
@@ -259,9 +287,10 @@ fn get_or_const(
     v: ValueId,
     values: &HashMap<ValueId, cranelift::prelude::Value>,
     fx: &mut FunctionBuilder,
+    triple: &Triple,
 ) -> cranelift::prelude::Value {
-    if let Some(c) = def.get_iconst(v) {
-        let ty = map_type(def.get_type(v));
+    if let Some(c) = def.get_int_const(v) {
+        let ty = map_type(triple, def.get_type_of(v));
         fx.ins().iconst(ty, c)
     } else {
         *values
@@ -276,8 +305,8 @@ fn get_float_or_const(
     values: &HashMap<ValueId, cranelift::prelude::Value>,
     fx: &mut FunctionBuilder,
 ) -> cranelift::prelude::Value {
-    if let Some(f) = def.get_fconst(v) {
-        match def.get_type(v) {
+    if let Some(f) = def.get_float_const(v) {
+        match def.get_type_of(v) {
             Type::Float32 => fx.ins().f32const(f as f32),
             Type::Float64 => fx.ins().f64const(f),
             _ => panic!("fconst on non-float type"),
@@ -298,6 +327,7 @@ fn get(
         .unwrap_or_else(|| panic!("missing value: {}", v))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_inst(
     def: &FunctionDef,
     inst: &Inst,
@@ -306,6 +336,7 @@ fn compile_inst(
     blocks: &HashMap<BlockId, cranelift::prelude::Block>,
     functions: &HashMap<FuncId, cranelift_module::FuncId>,
     func_refs: &HashMap<cranelift_module::FuncId, cranelift::codegen::ir::FuncRef>,
+    triple: &Triple,
 ) {
     log::trace!(
         "lowering inst: {:?}, operands: {:?}",
@@ -315,13 +346,13 @@ fn compile_inst(
 
     match &inst.kind {
         InstKind::IConst(x) => {
-            let ty = map_type(def.get_type(inst.result.unwrap()));
+            let ty = map_type(triple, def.get_type_of(inst.result.unwrap()));
             let val = fx.ins().iconst(ty, *x);
             values.insert(inst.result.unwrap(), val);
         }
 
         InstKind::FConst(bits) => {
-            let ty = def.get_type(inst.result.unwrap());
+            let ty = def.get_type_of(inst.result.unwrap());
             let val = match ty {
                 Type::Float32 => fx.ins().f32const(f32::from_bits(*bits as u32)),
                 Type::Float64 => fx.ins().f64const(f64::from_bits(*bits)),
@@ -330,21 +361,28 @@ fn compile_inst(
             values.insert(inst.result.unwrap(), val);
         }
 
-        InstKind::Add => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().iadd(a, b)),
-        InstKind::Sub => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().isub(a, b)),
-        InstKind::Mul => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().imul(a, b)),
-        InstKind::Div { signed: true } => {
-            bin_int(def, inst, values, fx, |fx, a, b| fx.ins().sdiv(a, b))
-        }
-        InstKind::Div { signed: false } => {
-            bin_int(def, inst, values, fx, |fx, a, b| fx.ins().udiv(a, b))
-        }
-        InstKind::Rem { signed: true } => {
-            bin_int(def, inst, values, fx, |fx, a, b| fx.ins().srem(a, b))
-        }
-        InstKind::Rem { signed: false } => {
-            bin_int(def, inst, values, fx, |fx, a, b| fx.ins().urem(a, b))
-        }
+        InstKind::Add => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().iadd(a, b)
+        }),
+        InstKind::Sub => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().isub(a, b)
+        }),
+        InstKind::Mul => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().imul(a, b)
+        }),
+        InstKind::Div { signed: true } => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().sdiv(a, b)
+        }),
+        InstKind::Div { signed: false } => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().udiv(a, b)
+        }),
+        InstKind::Rem { signed: true } => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().srem(a, b)
+        }),
+        InstKind::Rem { signed: false } => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().urem(a, b)
+        }),
+        InstKind::Neg => un_int(def, inst, values, fx, triple, |fx, a| fx.ins().ineg(a)),
 
         InstKind::FAdd => bin_float(def, inst, values, fx, |fx, a, b| fx.ins().fadd(a, b)),
         InstKind::FSub => bin_float(def, inst, values, fx, |fx, a, b| fx.ins().fsub(a, b)),
@@ -353,18 +391,29 @@ fn compile_inst(
         InstKind::FRem => {
             panic!("frem is not a native Cranelift opcode; use an fmodf/fmod libcall")
         }
+        InstKind::FNeg => un_float(def, inst, values, fx, |fx, a| fx.ins().fneg(a)),
 
-        InstKind::Not => un_int(def, inst, values, fx, |fx, v| fx.ins().bnot(v)),
-        InstKind::And => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().band(a, b)),
-        InstKind::Or => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().bor(a, b)),
-        InstKind::Xor => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().bxor(a, b)),
-        InstKind::LShl => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().ishl(a, b)),
-        InstKind::LShr => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().ushr(a, b)),
-        InstKind::AShr => bin_int(def, inst, values, fx, |fx, a, b| fx.ins().sshr(a, b)),
+        InstKind::Not => un_int(def, inst, values, fx, triple, |fx, v| fx.ins().bnot(v)),
+        InstKind::And => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().band(a, b)
+        }),
+        InstKind::Or => bin_int(def, inst, values, fx, triple, |fx, a, b| fx.ins().bor(a, b)),
+        InstKind::Xor => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().bxor(a, b)
+        }),
+        InstKind::LShl => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().ishl(a, b)
+        }),
+        InstKind::LShr => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().ushr(a, b)
+        }),
+        InstKind::AShr => bin_int(def, inst, values, fx, triple, |fx, a, b| {
+            fx.ins().sshr(a, b)
+        }),
 
         InstKind::Cmp(kind) => {
-            let lhs = get_or_const(def, inst.operands[0], values, fx);
-            let rhs = get_or_const(def, inst.operands[1], values, fx);
+            let lhs = get_or_const(def, inst.operands[0], values, fx, triple);
+            let rhs = get_or_const(def, inst.operands[1], values, fx, triple);
             let cond = map_int_cond(*kind);
             let val = fx.ins().icmp(cond, lhs, rhs);
             values.insert(inst.result.unwrap(), val);
@@ -379,7 +428,7 @@ fn compile_inst(
         }
 
         InstKind::Alloca(ty) => {
-            let ty = map_type(*ty);
+            let ty = map_type(triple, *ty);
             let size = ty.bytes();
             let slot = fx.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
@@ -391,7 +440,7 @@ fn compile_inst(
         }
 
         InstKind::NAlloca(ty, count) => {
-            let ty = map_type(*ty);
+            let ty = map_type(triple, *ty);
             let elem_bytes = ty.bytes();
             let size = elem_bytes * (*count as u32);
             let slot_data = StackSlotData::new(StackSlotKind::ExplicitSlot, size, 0);
@@ -402,7 +451,7 @@ fn compile_inst(
 
         InstKind::Load { volatile } => {
             let ptr = get(inst.operands[0], values);
-            let result_ty = map_type(def.get_type(inst.result.unwrap()));
+            let result_ty = map_type(triple, def.get_type_of(inst.result.unwrap()));
             let mut flags = MemFlags::new();
             if !volatile {
                 flags.set_notrap();
@@ -423,7 +472,7 @@ fn compile_inst(
 
         InstKind::PtrOffset => {
             let base = get(inst.operands[0], values);
-            let offset = get_or_const(def, inst.operands[1], values, fx);
+            let offset = get_or_const(def, inst.operands[1], values, fx, triple);
             let ptr = fx.ins().iadd(base, offset);
             values.insert(inst.result.unwrap(), ptr);
         }
@@ -432,7 +481,7 @@ fn compile_inst(
             let base = get(inst.operands[0], values);
             let base_ty = fx.func.dfg.value_type(base);
 
-            let raw_offset = get_or_const(def, inst.operands[1], values, fx);
+            let raw_offset = get_or_const(def, inst.operands[1], values, fx, triple);
             let offset_ty = fx.func.dfg.value_type(raw_offset);
 
             let offset_expanded = if offset_ty.bits() < 64 {
@@ -465,7 +514,7 @@ fn compile_inst(
             let args: Vec<cranelift::prelude::Value> = inst
                 .operands
                 .iter()
-                .map(|&v| get_or_const(def, v, values, fx))
+                .map(|&v| get_or_const(def, v, values, fx, triple))
                 .collect();
 
             let call_inst = fx.ins().call(*func_ref, &args);
@@ -482,9 +531,9 @@ fn compile_inst(
 
         InstKind::Cast(kind) => {
             let src = get(inst.operands[0], values);
-            let src_ty = def.get_type(inst.operands[0]);
-            let dst_ty = def.get_type(inst.result.unwrap());
-            let result = lower_cast(*kind, src, src_ty, dst_ty, fx);
+            let src_ty = def.get_type_of(inst.operands[0]);
+            let dst_ty = def.get_type_of(inst.result.unwrap());
+            let result = lower_cast(*kind, src, src_ty, dst_ty, fx, triple);
             values.insert(inst.result.unwrap(), result);
         }
 
@@ -494,7 +543,7 @@ fn compile_inst(
             let args: Vec<BlockArg> = inst
                 .operands
                 .iter()
-                .map(|&op| BlockArg::Value(get_or_const(def, op, values, fx)))
+                .map(|&op| BlockArg::Value(get_or_const(def, op, values, fx, triple)))
                 .collect();
 
             fx.ins().jump(target_bb, &args);
@@ -513,11 +562,11 @@ fn compile_inst(
 
             let then_args: Vec<BlockArg> = then_params
                 .iter()
-                .map(|&op| BlockArg::Value(get_or_const(def, op, values, fx)))
+                .map(|&op| BlockArg::Value(get_or_const(def, op, values, fx, triple)))
                 .collect();
             let else_args: Vec<BlockArg> = else_params
                 .iter()
-                .map(|&op| BlockArg::Value(get_or_const(def, op, values, fx)))
+                .map(|&op| BlockArg::Value(get_or_const(def, op, values, fx, triple)))
                 .collect();
 
             fx.ins()
@@ -532,6 +581,28 @@ fn compile_inst(
                 fx.ins().return_(&[v]);
             }
         }
+
+        InstKind::Undef => {
+            let result_id = inst.result.unwrap();
+            let dst_ty = def.get_type_of(result_id);
+            let cl_ty = map_type(triple, dst_ty);
+            let size = cl_ty.bytes();
+            let slot = fx.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                size,
+                0,
+            ));
+            let val = fx.ins().stack_load(cl_ty, slot, 0);
+            values.insert(result_id, val);
+        }
+
+        InstKind::Select => {
+            let cond = get_or_const(def, inst.operands[0], values, fx, triple);
+            let tvalue = get_or_const(def, inst.operands[1], values, fx, triple);
+            let evalue = get_or_const(def, inst.operands[2], values, fx, triple);
+            let result = fx.ins().select(cond, tvalue, evalue);
+            values.insert(inst.result.unwrap(), result);
+        }
     }
 }
 
@@ -541,8 +612,9 @@ fn lower_cast(
     src_ty: Type,
     dst_ty: Type,
     fx: &mut FunctionBuilder,
+    triple: &Triple,
 ) -> cranelift::prelude::Value {
-    let cl_dst = map_type(dst_ty);
+    let cl_dst = map_type(triple, dst_ty);
 
     match kind {
         CastKind::Zext => fx.ins().uextend(cl_dst, src),
@@ -569,6 +641,7 @@ fn bin_int<F>(
     inst: &Inst,
     values: &mut HashMap<ValueId, cranelift::prelude::Value>,
     fx: &mut FunctionBuilder,
+    triple: &Triple,
     f: F,
 ) where
     F: Fn(
@@ -577,8 +650,8 @@ fn bin_int<F>(
         cranelift::prelude::Value,
     ) -> cranelift::prelude::Value,
 {
-    let a = get_or_const(def, inst.operands[0], values, fx);
-    let b = get_or_const(def, inst.operands[1], values, fx);
+    let a = get_or_const(def, inst.operands[0], values, fx, triple);
+    let b = get_or_const(def, inst.operands[1], values, fx, triple);
     let res = f(fx, a, b);
     values.insert(inst.result.unwrap(), res);
 }
@@ -588,11 +661,13 @@ fn un_int<F>(
     inst: &Inst,
     values: &mut HashMap<ValueId, cranelift::prelude::Value>,
     fx: &mut FunctionBuilder,
+    triple: &Triple,
+
     f: F,
 ) where
     F: Fn(&mut FunctionBuilder, cranelift::prelude::Value) -> cranelift::prelude::Value,
 {
-    let a = get_or_const(def, inst.operands[0], values, fx);
+    let a = get_or_const(def, inst.operands[0], values, fx, triple);
     let res = f(fx, a);
     values.insert(inst.result.unwrap(), res);
 }
@@ -613,5 +688,19 @@ fn bin_float<F>(
     let a = get_float_or_const(def, inst.operands[0], values, fx);
     let b = get_float_or_const(def, inst.operands[1], values, fx);
     let res = f(fx, a, b);
+    values.insert(inst.result.unwrap(), res);
+}
+
+fn un_float<F>(
+    def: &FunctionDef,
+    inst: &Inst,
+    values: &mut HashMap<ValueId, cranelift::prelude::Value>,
+    fx: &mut FunctionBuilder,
+    f: F,
+) where
+    F: Fn(&mut FunctionBuilder, cranelift::prelude::Value) -> cranelift::prelude::Value,
+{
+    let a = get_float_or_const(def, inst.operands[0], values, fx);
+    let res = f(fx, a);
     values.insert(inst.result.unwrap(), res);
 }

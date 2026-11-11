@@ -26,14 +26,13 @@ pub fn cse(m: &mut Module, f: FuncId) -> bool {
     let mut changed = false;
 
     let mut table: HashMap<(BlockId, InstKey), ValueId> = HashMap::new();
-    let insts: Vec<InstId> = func.insts.keys().cloned().collect();
 
-    for id in insts {
-        if !func.insts.contains_key(&id) {
-            continue;
-        }
-
-        let inst = func.insts[&id].clone();
+    let inst_ids = func.get_inst_ids();
+    for id in inst_ids {
+        let inst = match func.get_inst(id).cloned() {
+            Some(i) => i,
+            None => continue,
+        };
 
         let result = match inst.result {
             Some(v) => v,
@@ -44,12 +43,12 @@ pub fn cse(m: &mut Module, f: FuncId) -> bool {
             continue;
         }
 
-        let ty = func.get_type(result);
+        let ty = func.get_type_of(result);
 
         let ops: Vec<(ValueId, Type)> = inst
             .operands
             .iter()
-            .map(|&v| (v, func.get_type(v)))
+            .map(|&v| (v, func.get_type_of(v)))
             .collect();
 
         let key = InstKey {
@@ -63,10 +62,10 @@ pub fn cse(m: &mut Module, f: FuncId) -> bool {
                 log::trace!(
                     "replacing %{}:{} (B{}) -> %{}:{} (B{})",
                     result,
-                    func.get_type(result),
+                    func.get_type_of(result),
                     func.get_value_def_in(result).unwrap(),
                     existing,
-                    func.get_type(existing),
+                    func.get_type_of(existing),
                     func.get_value_def_in(existing).unwrap(),
                 );
                 func.replace_uses(result, existing);

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{hash_map, HashMap, HashSet},
+    hash::{Hash, Hasher},
+};
 
 use crate::types::{
     CallingConvention, CastKind, FloatCmp, FunctionSignature, IntCmp, Linkage, Type,
@@ -9,22 +12,59 @@ pub type InstId = u32;
 pub type BlockId = u32;
 pub type FuncId = u32;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Value {
-    pub ty: Type,
-    pub def: InstId,
-    pub uses: Vec<Use>,
+    ty: Type,
+    def: InstId,
+    uses: Vec<Use>,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl Value {
+    pub fn new(ty: Type, def: InstId, uses: &[Use]) -> Self {
+        Self {
+            ty,
+            def,
+            uses: uses.into(),
+        }
+    }
+
+    /// Get type of value
+    pub fn get_type(&self) -> Type {
+        self.ty
+    }
+
+    /// Get instruction id who defines this value
+    pub fn get_def(&self) -> InstId {
+        self.def
+    }
+
+    /// Get value uses
+    pub fn get_uses(&self) -> &[Use] {
+        &self.uses
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Use {
-    pub inst: InstId,
-    pub index: u32,
+    inst: InstId,
+    index: u32,
 }
 
-#[derive(Debug, Clone)]
+impl Use {
+    /// Get user instruction
+    pub fn get_inst(&self) -> InstId {
+        self.inst
+    }
+
+    /// Get user operand index
+    pub fn get_index(&self) -> u32 {
+        self.index
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Inst {
     pub kind: InstKind,
@@ -50,12 +90,14 @@ pub enum InstKind {
     Rem {
         signed: bool,
     },
+    Neg,
 
     FAdd,
     FSub,
     FMul,
     FDiv,
     FRem,
+    FNeg,
 
     Not,
     And,
@@ -108,6 +150,11 @@ pub enum InstKind {
     },
     /// ret {value}
     Ret,
+
+    Undef,
+
+    /// select {cond} {then_value}, {else_value}
+    Select,
 }
 
 impl InstKind {
@@ -116,6 +163,7 @@ impl InstKind {
 
         match self {
             IConst(_) | FConst(_) => 0,
+            Undef => 0,
 
             // binary instructions
             Add
@@ -144,7 +192,9 @@ impl InstKind {
             Cast(_) => 1,
             Ret => 1,
 
-            Not => 1,
+            Not | Neg | FNeg => 1,
+
+            Select => 3,
 
             // context depended
             Call(_) | Jump(_) | JumpIf { .. } => usize::MAX,
@@ -153,43 +203,45 @@ impl InstKind {
 
     pub fn get_cost(&self) -> u8 {
         match self {
-            // constants (free)
-            Self::IConst(_) | Self::FConst(_) => 0,
+            Self::Undef => 0,     // Purely a compiler placeholder, emits zero instructions.
+            Self::IConst(_) => 0, // Almost always encoded as an immediate or zeroed via XOR.
+            Self::FConst(_) => 1, // May force a constant pool load on RISC architectures.
+            Self::Jump(_) => 1,   // Unconditional branch; hardware front-end swallows this easily.
 
-            // arithmetic (cheap ALU)
-            Self::Add | Self::Sub => 2,
-            Self::FAdd | Self::FSub => 4,
-            // multiply/divide are expensive
-            Self::Mul | Self::Div { .. } | Self::Rem { .. } => 4,
-            Self::FMul | Self::FDiv | Self::FRem => 5,
+            Self::Add | Self::Sub | Self::Neg => 2,
+            Self::Not | Self::And | Self::Or | Self::Xor => 2,
+            Self::LShl | Self::LShr | Self::AShr => 2,
+            Self::Cmp(_) => 2,
 
-            // bitwise ops (very cheap)
-            Self::Not | Self::And | Self::Or | Self::Xor => 1,
+            Self::Alloca(_) | Self::NAlloca(_, _) => 2, // Just bumping the stack pointer (sub sp, imm).
+            Self::JumpIf { .. } => 4, // Conditional branch; penalized for potential mispredictions.
+            Self::Ret => 4, // Return; hits the Return Stack Buffer, but still costs a bit.
 
-            // shifts (cheap but not free)
-            Self::LShl | Self::LShr | Self::AShr => 1,
+            // Address arithmetic. x86 has LEA, but ARM/RISC-V might need an extra shift + add chain.
+            Self::PtrOffset | Self::ElementPtr(_) => 6,
 
-            // comparisons (ALU + flag logic)
-            Self::Cmp(_) | Self::FCmp(_) => 2,
+            Self::Select => 6, // Low-cost on x86 (cmov) and ARM (csel), but expands to branches on basic RISC-V.
+            Self::Cast(_) => 6, // Sign/zero extensions or float-to-int conversions.
 
-            // memory ops (expensive due to potential cache/memory)
-            Self::Load { .. } => 5,
-            Self::Store { .. } => 5,
+            Self::FAdd | Self::FSub => 8,
+            Self::FNeg => 1,
+            Self::FCmp(_) => 8,
 
-            Self::Alloca(_) | Self::NAlloca(_, _) => 3,
-            // address computation (usually cheap ALU-like)
-            Self::PtrOffset | Self::ElementPtr(_) => 2,
+            Self::Mul => 12, // Integer multiply is fully pipelined nowadays, but takes 3-5 cycles.
+            Self::FMul => 16, // Floating-point multiplication.
 
-            // function calls (very expensive, unknown cost)
-            Self::Call(_) => 10,
+            // Memory ops. Assuming L1 cache hit as best case, but we heavily penalize them
+            // to force the optimizer to keep variables in registers.
+            Self::Store { .. } => 15, // Hidden by store buffers, but still occupies execution slots.
+            Self::Load { .. } => 25, // Loads are blocking; later instructions usually have to wait for data.
 
-            // type conversions (varies, but usually cheap-medium)
-            Self::Cast(_) => 2,
+            Self::FDiv | Self::FRem => 60, // Floating-point division is never cheap.
 
-            // control flow (terminators)
-            Self::Jump(_) => 0,
-            Self::JumpIf { .. } => 0,
-            Self::Ret => 0,
+            // Integer division is a massive pain across all architectures.
+            // Non-pipelined, iterative microcode. On some RISC-V/ARM cores, this can take up to 60+ cycles.
+            Self::Div { .. } | Self::Rem { .. } => 120,
+
+            Self::Call(_) => 200,
         }
     }
 
@@ -214,44 +266,166 @@ impl InstKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Block {
-    pub params: Vec<ValueId>,
-    pub insts: Vec<InstId>,
-    pub term: Option<InstId>,
-    pub preds: Vec<BlockId>,
-    pub succs: Vec<BlockId>,
+    pub(crate) params: Vec<ValueId>,
+    pub(crate) insts: Vec<InstId>,
+    pub(crate) term: Option<InstId>,
+    pub(crate) preds: Vec<BlockId>,
+    pub(crate) succs: Vec<BlockId>,
+}
+
+impl Block {
+    pub fn get_params(&self) -> &Vec<ValueId> {
+        &self.params
+    }
+
+    pub fn get_params_mut(&mut self) -> &mut Vec<ValueId> {
+        &mut self.params
+    }
+
+    pub fn get_insts(&self) -> &Vec<InstId> {
+        &self.insts
+    }
+
+    pub fn get_insts_mut(&mut self) -> &mut Vec<InstId> {
+        &mut self.insts
+    }
+
+    pub fn get_terminator(&self) -> &Option<InstId> {
+        &self.term
+    }
+
+    pub fn get_terminator_mut(&mut self) -> &mut Option<InstId> {
+        &mut self.term
+    }
+
+    pub fn get_preds(&self) -> &Vec<BlockId> {
+        &self.preds
+    }
+
+    pub fn get_preds_mut(&mut self) -> &mut Vec<BlockId> {
+        &mut self.preds
+    }
+
+    pub fn get_succs(&self) -> &Vec<BlockId> {
+        &self.succs
+    }
+
+    pub fn get_succs_mut(&mut self) -> &mut Vec<BlockId> {
+        &mut self.succs
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FunctionDef {
-    pub blocks: HashMap<BlockId, Block>,
-    pub insts: HashMap<InstId, Inst>,
-    pub values: HashMap<ValueId, Value>,
+    blocks: HashMap<BlockId, Block>,
+    insts: HashMap<InstId, Inst>,
+    values: HashMap<ValueId, Value>,
+    entry: BlockId,
 
     next_block: BlockId,
     next_inst: InstId,
     next_value: ValueId,
+}
 
-    pub entry: BlockId,
-    pub params: Vec<ValueId>,
+impl Hash for FunctionDef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.next_block.hash(state);
+        self.next_inst.hash(state);
+        self.next_value.hash(state);
+
+        let mut blocks: Vec<_> = self.blocks.iter().collect();
+        blocks.sort_by_key(|(id, _)| *id);
+
+        for (id, block) in blocks {
+            id.hash(state);
+            block.hash(state);
+        }
+
+        let mut values: Vec<_> = self.values.iter().collect();
+        values.sort_by_key(|(id, _)| *id);
+
+        for (id, value) in values {
+            id.hash(state);
+            value.hash(state);
+        }
+
+        self.entry.hash(state);
+    }
 }
 
 impl FunctionDef {
     pub fn new() -> Self {
         let mut f = Self::default();
-        let entry = f.new_block();
+        let entry = f.create_block();
         f.entry = entry;
         f
+    }
+
+    pub fn get_hash(&self) -> u64 {
+        let mut state = crate::DefaultHasher::default();
+        self.hash(&mut state);
+        state.finish()
     }
 
     pub fn get_entry(&self) -> BlockId {
         self.entry
     }
 
-    pub fn reverse_post_order(&self) -> Vec<BlockId> {
+    pub fn get_entry_mut(&mut self) -> &mut BlockId {
+        &mut self.entry
+    }
+
+    pub fn get_blocks(&self) -> &HashMap<BlockId, Block> {
+        &self.blocks
+    }
+
+    pub fn get_blocks_mut(&mut self) -> &mut HashMap<BlockId, Block> {
+        &mut self.blocks
+    }
+
+    pub fn get_block(&self, block: BlockId) -> Option<&Block> {
+        self.blocks.get(&block)
+    }
+
+    pub fn get_block_mut(&mut self, block: BlockId) -> Option<&mut Block> {
+        self.blocks.get_mut(&block)
+    }
+
+    pub fn get_entry_block(&self) -> &Block {
+        self.get_block(self.get_entry()).unwrap()
+    }
+
+    pub fn get_block_params(&self, block: BlockId) -> &[ValueId] {
+        &self.get_block(block).unwrap().params
+    }
+
+    pub fn get_params(&self) -> &[ValueId] {
+        self.get_block_params(self.get_entry())
+    }
+
+    pub fn add_block_param(&mut self, block: BlockId, ty: Type) -> ValueId {
+        let v = self.create_value_without_def(ty);
+        self.blocks.get_mut(&block).unwrap().params.push(v);
+        v
+    }
+
+    pub fn add_param(&mut self, ty: Type) -> ValueId {
+        self.add_block_param(self.entry, ty)
+    }
+
+    pub fn get_block_ids(&self) -> Vec<BlockId> {
+        self.get_blocks().keys().cloned().collect()
+    }
+
+    pub fn get_inst_ids(&self) -> Vec<InstId> {
+        self.get_insts().keys().cloned().collect()
+    }
+
+    pub fn compute_rpo(&self) -> Vec<BlockId> {
         let mut visited = HashSet::new();
         let mut post_order = Vec::new();
 
@@ -279,7 +453,7 @@ impl FunctionDef {
         post_order
     }
 
-    pub fn new_block(&mut self) -> BlockId {
+    pub fn create_block(&mut self) -> BlockId {
         let id = self.next_block;
         self.next_block += 1;
 
@@ -297,24 +471,7 @@ impl FunctionDef {
         id
     }
 
-    pub fn get_block_params(&self, block: BlockId) -> &Vec<ValueId> {
-        let block = self.blocks.get(&block).unwrap();
-        &block.params
-    }
-
-    pub fn add_param(&mut self, ty: Type) -> ValueId {
-        let v = self.add_block_param(self.entry, ty);
-        self.params.push(v);
-        v
-    }
-
-    pub fn add_block_param(&mut self, block: BlockId, ty: Type) -> ValueId {
-        let v = self.new_value(ty, InstId::MAX);
-        self.blocks.get_mut(&block).unwrap().params.push(v);
-        v
-    }
-
-    fn new_value(&mut self, ty: Type, def: InstId) -> ValueId {
+    fn create_value(&mut self, ty: Type, def: InstId) -> ValueId {
         let id = self.next_value;
         self.next_value += 1;
 
@@ -330,6 +487,10 @@ impl FunctionDef {
         id
     }
 
+    fn create_value_without_def(&mut self, ty: Type) -> ValueId {
+        self.create_value(ty, InstId::MAX)
+    }
+
     pub fn add_use(&mut self, value: ValueId, inst: InstId, index: u32) {
         self.values
             .get_mut(&value)
@@ -338,29 +499,8 @@ impl FunctionDef {
             .push(Use { inst, index });
     }
 
-    fn append_inst_detail(
-        &mut self,
-        block: BlockId,
-        kind: InstKind,
-        result_ty: Type,
-        operands: Vec<ValueId>,
-    ) -> (InstId, ValueId) {
-        let (inst, val) = self.try_append_inst(block, kind, result_ty, operands);
-        (inst, val.unwrap_or(ValueId::MAX))
-    }
-
-    pub fn append_inst(
-        &mut self,
-        block: BlockId,
-        kind: InstKind,
-        result_ty: Type,
-        operands: Vec<ValueId>,
-    ) -> ValueId {
-        let (_, val) = self.try_append_inst(block, kind, result_ty, operands);
-        val.unwrap_or(ValueId::MAX)
-    }
-
-    pub fn try_append_inst(
+    /// used in builder.rs
+    pub(super) fn append_inst_base(
         &mut self,
         block: BlockId,
         kind: InstKind,
@@ -371,7 +511,7 @@ impl FunctionDef {
         self.next_inst += 1;
 
         let result = if !result_ty.is_void() {
-            Some(self.new_value(result_ty, inst_id))
+            Some(self.create_value(result_ty, inst_id))
         } else {
             None
         };
@@ -421,7 +561,19 @@ impl FunctionDef {
         (inst_id, result)
     }
 
-    pub fn get_type(&self, v: ValueId) -> Type {
+    /// used in builder.rs
+    pub(super) fn append_inst(
+        &mut self,
+        block: BlockId,
+        kind: InstKind,
+        result_ty: Type,
+        operands: Vec<ValueId>,
+    ) -> ValueId {
+        let (_, val) = self.append_inst_base(block, kind, result_ty, operands);
+        val.unwrap_or(ValueId::MAX)
+    }
+
+    pub fn get_type_of(&self, v: ValueId) -> Type {
         self.values.get(&v).map(|v| v.ty).unwrap_or(Type::Void)
     }
 
@@ -443,7 +595,7 @@ impl FunctionDef {
         }
     }
 
-    pub fn get_iconst(&self, v: ValueId) -> Option<i64> {
+    pub fn get_int_const(&self, v: ValueId) -> Option<i64> {
         let val = &self.values[&v];
         if val.def == InstId::MAX {
             return None;
@@ -455,20 +607,20 @@ impl FunctionDef {
         }
     }
 
-    pub fn get_fconst(&self, v: ValueId) -> Option<f64> {
+    pub fn get_float_const_bits(&self, v: ValueId) -> Option<u64> {
         let val = &self.values[&v];
         if val.def == InstId::MAX {
             return None;
         }
 
         match self.insts[&val.def].kind {
-            InstKind::FConst(x) => Some(f64::from_bits(x)),
+            InstKind::FConst(x) => Some(x),
             _ => None,
         }
     }
 
-    pub fn lookup_block(&self, b: BlockId) -> Option<&Block> {
-        self.blocks.get(&b)
+    pub fn get_float_const(&self, v: ValueId) -> Option<f64> {
+        self.get_float_const_bits(v).map(f64::from_bits)
     }
 
     pub(crate) fn get_jumpif_params<'a>(
@@ -482,8 +634,8 @@ impl FunctionDef {
         {
             let cond = inst.operands[0];
 
-            let t = self.lookup_block(then_block).unwrap().params.len();
-            let e = self.lookup_block(else_block).unwrap().params.len();
+            let t = self.get_block_params(then_block).len();
+            let e = self.get_block_params(else_block).len();
 
             let then_start = 1;
             let then_end = then_start + t;
@@ -500,300 +652,72 @@ impl FunctionDef {
         }
     }
 
-    pub fn is_value_valid(&self, v: ValueId) -> bool {
+    pub fn has_value(&self, v: ValueId) -> bool {
         self.values.contains_key(&v)
     }
 
-    pub fn make_iconst(&mut self, block: BlockId, ty: Type, x: i64) -> ValueId {
-        self.append_inst(block, InstKind::IConst(x), ty, vec![])
-    }
-
-    pub fn make_fconst_bits(&mut self, block: BlockId, ty: Type, bits: u64) -> ValueId {
-        self.append_inst(block, InstKind::FConst(bits), ty, vec![])
-    }
-
-    pub fn make_fconst(&mut self, block: BlockId, ty: Type, x: f64) -> ValueId {
-        self.append_inst(block, InstKind::FConst(x.to_bits()), ty, vec![])
-    }
-
-    fn make_unary(&mut self, block: BlockId, kind: InstKind, ty: Type, value: ValueId) -> ValueId {
-        self.append_inst(block, kind, ty, vec![value])
-    }
-
-    fn make_binary(
-        &mut self,
-        block: BlockId,
-        kind: InstKind,
-        ty: Type,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> ValueId {
-        self.append_inst(block, kind, ty, vec![lhs, rhs])
-    }
-
-    pub fn make_cmp(
-        &mut self,
-        block: BlockId,
-        kind: IntCmp,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> ValueId {
-        self.make_binary(block, InstKind::Cmp(kind), Type::Int1, lhs, rhs)
-    }
-
-    pub fn make_fcmp(
-        &mut self,
-        block: BlockId,
-        kind: FloatCmp,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> ValueId {
-        self.make_binary(block, InstKind::FCmp(kind), Type::Int1, lhs, rhs)
-    }
-
-    pub fn make_cast(
-        &mut self,
-        block: BlockId,
-        kind: CastKind,
-        ty: Type,
-        value: ValueId,
-    ) -> ValueId {
-        self.make_unary(block, InstKind::Cast(kind), ty, value)
-    }
-
-    pub fn make_add(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::Add, ty, lhs, rhs)
-    }
-
-    pub fn make_sub(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::Sub, ty, lhs, rhs)
-    }
-
-    pub fn make_mul(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::Mul, ty, lhs, rhs)
-    }
-
-    pub fn make_div(
-        &mut self,
-        block: BlockId,
-        signed: bool,
-        ty: Type,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> ValueId {
-        self.make_binary(block, InstKind::Div { signed }, ty, lhs, rhs)
-    }
-
-    pub fn make_rem(
-        &mut self,
-        block: BlockId,
-        signed: bool,
-        ty: Type,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> ValueId {
-        self.make_binary(block, InstKind::Rem { signed }, ty, lhs, rhs)
-    }
-
-    pub fn make_fadd(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::FAdd, ty, lhs, rhs)
-    }
-
-    pub fn make_fsub(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::FSub, ty, lhs, rhs)
-    }
-
-    pub fn make_fmul(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::FMul, ty, lhs, rhs)
-    }
-
-    pub fn make_fdiv(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::FDiv, ty, lhs, rhs)
-    }
-
-    pub fn make_frem(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::FRem, ty, lhs, rhs)
-    }
-
-    pub fn make_not(&mut self, block: BlockId, ty: Type, value: ValueId) -> ValueId {
-        self.make_unary(block, InstKind::Not, ty, value)
-    }
-
-    pub fn make_and(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::And, ty, lhs, rhs)
-    }
-
-    pub fn make_or(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::Or, ty, lhs, rhs)
-    }
-
-    pub fn make_xor(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::Xor, ty, lhs, rhs)
-    }
-
-    pub fn make_lshl(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::LShl, ty, lhs, rhs)
-    }
-
-    pub fn make_lshr(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::LShr, ty, lhs, rhs)
-    }
-
-    pub fn make_ashr(&mut self, block: BlockId, ty: Type, lhs: ValueId, rhs: ValueId) -> ValueId {
-        self.make_binary(block, InstKind::AShr, ty, lhs, rhs)
-    }
-
-    pub fn make_store(
-        &mut self,
-        block: BlockId,
-        volatile: bool,
-        ptr: ValueId,
-        value: ValueId,
-    ) -> ValueId {
-        self.append_inst(
-            block,
-            InstKind::Store { volatile },
-            Type::Void,
-            vec![ptr, value],
-        )
-    }
-
-    pub fn make_load(&mut self, block: BlockId, volatile: bool, ty: Type, ptr: ValueId) -> ValueId {
-        self.append_inst(block, InstKind::Load { volatile }, ty, vec![ptr])
-    }
-
-    pub fn make_ptr_offset(&mut self, block: BlockId, base: ValueId, offset: ValueId) -> ValueId {
-        self.append_inst(
-            block,
-            InstKind::PtrOffset,
-            Type::Pointer,
-            vec![base, offset],
-        )
-    }
-
-    pub fn make_element_ptr(
-        &mut self,
-        block: BlockId,
-        ty: Type,
-        base: ValueId,
-        offset: ValueId,
-    ) -> ValueId {
-        self.append_inst(
-            block,
-            InstKind::ElementPtr(ty),
-            Type::Pointer,
-            vec![base, offset],
-        )
-    }
-
-    pub fn make_alloca(&mut self, block: BlockId, ty: Type) -> ValueId {
-        self.append_inst(block, InstKind::Alloca(ty), Type::Pointer, vec![])
-    }
-
-    pub fn make_nalloca(&mut self, block: BlockId, ty: Type, count: usize) -> ValueId {
-        self.append_inst(block, InstKind::NAlloca(ty, count), Type::Pointer, vec![])
-    }
-
-    pub fn make_call(
-        &mut self,
-        block: BlockId,
-        ty: Type,
-        func: FuncId,
-        operands: Vec<ValueId>,
-    ) -> ValueId {
-        self.append_inst(block, InstKind::Call(func), ty, operands)
-    }
-
-    pub fn make_ret(&mut self, block: BlockId, value: Option<ValueId>) {
-        let mut operands = vec![];
-        if let Some(v) = value {
-            operands.push(v);
-        }
-        let (i, _) = self.append_inst_detail(block, InstKind::Ret, Type::Void, operands);
-        self.set_terminator(block, i);
-    }
-
-    fn set_terminator(&mut self, block: BlockId, inst: InstId) {
+    /// used in builder.rs
+    pub(super) fn set_terminator(&mut self, block: BlockId, inst: InstId) {
         let blk = self.blocks.get_mut(&block).expect("block not exists");
         blk.term = Some(inst);
-    }
-
-    pub fn make_jump(&mut self, block: BlockId, target: BlockId, params: Vec<ValueId>) {
-        let (i, _) = self.append_inst_detail(block, InstKind::Jump(target), Type::Void, params);
-        self.set_terminator(block, i);
-    }
-
-    pub fn make_jumpif(
-        &mut self,
-        block: BlockId,
-        cond: ValueId,
-        then_block: BlockId,
-        then_params: Vec<ValueId>,
-        else_block: BlockId,
-        else_params: Vec<ValueId>,
-    ) {
-        let mut operands = Vec::with_capacity(1 + then_params.len() + else_params.len());
-
-        operands.push(cond);
-        operands.extend(then_params);
-        operands.extend(else_params);
-
-        let (i, _) = self.append_inst_detail(
-            block,
-            InstKind::JumpIf {
-                then_block,
-                else_block,
-            },
-            Type::Void,
-            operands,
-        );
-        self.set_terminator(block, i);
     }
 
     fn reassign_values(&mut self) {
         let mut id_map: HashMap<ValueId, ValueId> = HashMap::new();
         let mut next_id: ValueId = 0;
 
-        let block_ids: Vec<BlockId> = self.reverse_post_order();
+        let block_ids = self.compute_rpo();
 
-        // pass 1: assign ids to all block params in order
-        for &block_id in &block_ids {
-            let old_params = self.blocks[&block_id].params.clone();
-            for &old_param in &old_params {
-                id_map.insert(old_param, next_id);
-                next_id += 1;
-            }
+        // value ids order:
+        //   - entry block params
+        //   - block params
+        //   - constants
+        //   - normal instructions
+        let entry = self.entry;
+
+        for &param in &self.blocks[&entry].params {
+            id_map.insert(param, next_id);
+            next_id += 1;
         }
 
-        // pass 2: assign ids to constants and other insts by block
         for &block_id in &block_ids {
-            let old_insts = self.blocks[&block_id].insts.clone();
+            let block = &self.blocks[&block_id];
 
-            for &inst_id in &old_insts {
-                #[allow(clippy::collapsible_if, clippy::map_entry)]
-                if let Some(inst) = self.insts.get(&inst_id) {
-                    if matches!(inst.kind, InstKind::IConst(_) | InstKind::FConst(_)) {
-                        if let Some(old_result) = inst.result {
-                            if !id_map.contains_key(&old_result) {
-                                id_map.insert(old_result, next_id);
-                                next_id += 1;
-                            }
+            if block_id != entry {
+                for &param in &block.params {
+                    id_map.insert(param, next_id);
+                    next_id += 1;
+                }
+            }
+
+            for &inst_id in &block.insts {
+                let Some(inst) = self.insts.get(&inst_id) else {
+                    continue;
+                };
+                #[allow(clippy::collapsible_if)]
+                if matches!(inst.kind, InstKind::IConst(_) | InstKind::FConst(_)) {
+                    if let Some(result) = inst.result {
+                        if let hash_map::Entry::Vacant(e) = id_map.entry(result) {
+                            e.insert(next_id);
+                            next_id += 1;
                         }
                     }
                 }
             }
 
-            for &inst_id in &old_insts {
-                #[allow(clippy::collapsible_if, clippy::map_entry)]
-                if let Some(inst) = self.insts.get(&inst_id) {
-                    if !matches!(inst.kind, InstKind::IConst(_) | InstKind::FConst(_))
-                        && !inst.kind.is_terminator()
-                    {
-                        if let Some(old_result) = inst.result {
-                            if !id_map.contains_key(&old_result) {
-                                id_map.insert(old_result, next_id);
-                                next_id += 1;
-                            }
+            for &inst_id in &block.insts {
+                let Some(inst) = self.insts.get(&inst_id) else {
+                    continue;
+                };
+
+                #[allow(clippy::collapsible_if)]
+                if !matches!(inst.kind, InstKind::IConst(_) | InstKind::FConst(_))
+                    && !inst.kind.is_terminator()
+                {
+                    if let Some(result) = inst.result {
+                        if let std::collections::hash_map::Entry::Vacant(e) = id_map.entry(result) {
+                            e.insert(next_id);
+                            next_id += 1;
                         }
                     }
                 }
@@ -801,74 +725,80 @@ impl FunctionDef {
         }
 
         for old_id in self.values.keys().copied().collect::<Vec<_>>() {
-            #[allow(clippy::map_entry)]
-            if !id_map.contains_key(&old_id) {
-                id_map.insert(old_id, next_id);
+            if let hash_map::Entry::Vacant(e) = id_map.entry(old_id) {
+                e.insert(next_id);
                 next_id += 1;
             }
         }
 
-        // pass 3: rebuild with new ids
-        let mut new_values: HashMap<ValueId, Value> = HashMap::new();
-        let mut new_insts: HashMap<InstId, Inst> = HashMap::new();
+        //
+        // rebuild
+        //
+        let mut new_values = HashMap::<ValueId, Value>::new();
 
-        for (old_id, old_val) in &self.values {
-            if let Some(&new_id) = id_map.get(old_id) {
-                new_values.insert(new_id, old_val.clone());
-            }
+        for (old_id, value) in &self.values {
+            let Some(&new_id) = id_map.get(old_id) else {
+                continue;
+            };
+
+            new_values.insert(new_id, value.clone());
         }
 
-        for (inst_id, inst) in &self.insts {
-            let mut new_inst = inst.clone();
+        //
+        // rewrite
+        //
+        let mut new_insts = HashMap::<InstId, Inst>::new();
 
-            new_inst.operands = new_inst
+        for (&inst_id, inst) in &self.insts {
+            let mut inst = inst.clone();
+
+            inst.operands = inst
                 .operands
                 .iter()
-                .map(|&op| id_map.get(&op).copied().unwrap_or(op))
+                .map(|v| id_map.get(v).copied().unwrap_or(*v))
                 .collect();
 
-            if let Some(old_result) = inst.result {
-                new_inst.result = id_map.get(&old_result).copied();
+            if let Some(result) = inst.result {
+                inst.result = id_map.get(&result).copied();
             }
 
-            new_insts.insert(*inst_id, new_inst);
+            new_insts.insert(inst_id, inst);
         }
 
-        // pass 4: reconstruct block.insts: constants first, then others
         for &block_id in &block_ids {
             let old_insts = self.blocks[&block_id].insts.clone();
 
-            let mut const_insts = Vec::new();
-            let mut other_insts = Vec::new();
+            let mut consts = Vec::new();
+            let mut others = Vec::new();
 
-            for &inst_id in &old_insts {
-                if let Some(inst) = new_insts.get(&inst_id) {
-                    if matches!(inst.kind, InstKind::IConst(_) | InstKind::FConst(_)) {
-                        const_insts.push(inst_id);
-                    } else if !inst.kind.is_terminator() {
-                        other_insts.push(inst_id);
-                    }
+            for inst_id in old_insts {
+                let Some(inst) = new_insts.get(&inst_id) else {
+                    continue;
+                };
+
+                if matches!(inst.kind, InstKind::IConst(_) | InstKind::FConst(_)) {
+                    consts.push(inst_id);
+                } else if !inst.kind.is_terminator() {
+                    others.push(inst_id);
                 }
             }
 
-            // reconstruction: constants, instructions, terminator
-            let mut new_block_insts = Vec::new();
-            new_block_insts.extend(&const_insts);
-            new_block_insts.extend(&other_insts);
+            let mut reordered = Vec::new();
+            reordered.extend(consts);
+            reordered.extend(others);
 
-            if let Some(term_id) = self.blocks[&block_id].term {
-                new_block_insts.push(term_id);
+            if let Some(term) = self.blocks[&block_id].term {
+                reordered.push(term);
             }
 
-            self.blocks.get_mut(&block_id).unwrap().insts = new_block_insts;
+            self.blocks.get_mut(&block_id).unwrap().insts = reordered;
         }
 
-        // update block params with new ids
         for block in self.blocks.values_mut() {
             block.params = block
                 .params
                 .iter()
-                .map(|&p| id_map.get(&p).copied().unwrap_or(p))
+                .map(|v| id_map.get(v).copied().unwrap_or(*v))
                 .collect();
         }
 
@@ -1043,20 +973,40 @@ impl FunctionDef {
         &self.values
     }
 
+    pub fn get_value(&self, v: ValueId) -> Option<&Value> {
+        self.get_values().get(&v)
+    }
+
+    pub fn get_values_mut(&mut self) -> &mut HashMap<ValueId, Value> {
+        &mut self.values
+    }
+
+    pub fn get_value_mut(&mut self, v: ValueId) -> Option<&mut Value> {
+        self.get_values_mut().get_mut(&v)
+    }
+
     pub fn get_insts(&self) -> &HashMap<InstId, Inst> {
         &self.insts
     }
 
+    pub fn get_inst(&self, id: InstId) -> Option<&Inst> {
+        self.insts.get(&id)
+    }
+
+    pub fn get_insts_mut(&mut self) -> &mut HashMap<InstId, Inst> {
+        &mut self.insts
+    }
+
+    pub fn get_inst_mut(&mut self, id: InstId) -> Option<&mut Inst> {
+        self.insts.get_mut(&id)
+    }
+
     pub fn replace_uses(&mut self, from: ValueId, to: ValueId) {
         log::trace!("replacing %{} => %{}", from, to);
-        let uses = self
-            .values
-            .get(&from)
-            .map(|v| v.uses.clone())
-            .unwrap_or_default();
 
+        let uses = self.get_uses(from).to_vec();
         for u in uses {
-            if let Some(inst) = self.insts.get_mut(&u.inst) {
+            if let Some(inst) = self.get_inst_mut(u.inst) {
                 inst.operands[u.index as usize] = to;
             }
 
@@ -1069,9 +1019,37 @@ impl FunctionDef {
             v.uses.clear();
         }
     }
+
+    pub fn clear_uses(&mut self, val: ValueId) {
+        if let Some(v) = self.values.get_mut(&val) {
+            v.uses.clear();
+        }
+    }
+
+    pub fn uses_iter(&self, v: ValueId) -> impl Iterator<Item = Use> + '_ {
+        self.values.get(&v).into_iter().flat_map(|v| v.uses.clone())
+    }
+
+    pub fn get_uses(&self, v: ValueId) -> &[Use] {
+        match self.values.get(&v) {
+            Some(v) => &v.uses,
+            None => &[],
+        }
+    }
+
+    pub fn users_iter(&self, v: ValueId) -> impl Iterator<Item = InstId> + '_ {
+        self.values
+            .get(&v)
+            .into_iter()
+            .flat_map(|val| val.uses.iter().map(|u| u.inst))
+    }
+
+    pub fn get_users(&self, v: ValueId) -> Vec<InstId> {
+        self.users_iter(v).collect()
+    }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Function {
     pub name: String,
@@ -1119,7 +1097,7 @@ impl Function {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Module {
     pub name: String,
@@ -1169,6 +1147,20 @@ impl Module {
         if func.definition.is_some() {
             return Err(format!("function {} already defined", id));
         }
+
+        func.definition = Some(def.into());
+        Ok(())
+    }
+
+    pub fn set_definition(
+        &mut self,
+        id: FuncId,
+        def: impl Into<FunctionDef>,
+    ) -> Result<(), String> {
+        let func = self
+            .functions
+            .get_mut(&id)
+            .ok_or_else(|| format!("function {} not found", id))?;
 
         func.definition = Some(def.into());
         Ok(())

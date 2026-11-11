@@ -28,11 +28,11 @@ impl TreeSsaRaiser {
     }
 
     pub fn raise_function(&mut self, src: &ssa::FunctionDef, dst: &mut FunctionDef) {
-        let rpo = src.reverse_post_order();
+        let rpo = src.compute_rpo();
 
         for &bid in &rpo {
-            let block = &src.blocks[&bid];
-            let is_entry = bid == src.entry;
+            let block = src.get_block(bid).unwrap();
+            let is_entry = bid == src.get_entry();
             let dst_bid = if is_entry {
                 dst.get_entry()
             } else {
@@ -40,7 +40,7 @@ impl TreeSsaRaiser {
             };
             self.block_map.insert(bid, dst_bid);
             for &param in &block.params {
-                let ty = src.values[&param].ty;
+                let ty = src.get_type_of(param);
                 let var_expr = dst.add_block_param(dst_bid, ty);
                 if let ExprKind::Var(v) = &var_expr.kind {
                     self.value_map.insert(param, *v);
@@ -55,10 +55,10 @@ impl TreeSsaRaiser {
 
     fn raise_block(&mut self, bid: ssa::BlockId, src: &ssa::FunctionDef, dst: &mut FunctionDef) {
         let dst_bid = self.block_map[&bid];
-        let block = &src.blocks[&bid];
+        let block = src.get_block(bid).unwrap();
 
         for &iid in &block.insts {
-            let inst = &src.insts[&iid];
+            let inst = &src.get_inst(iid).unwrap();
             if inst.kind.is_terminator() {
                 continue;
             }
@@ -72,7 +72,7 @@ impl TreeSsaRaiser {
         }
 
         if let Some(term_id) = block.term {
-            let inst = &src.insts[&term_id];
+            let inst = &src.get_inst(term_id).unwrap();
             self.raise_terminator(inst, src, dst, dst_bid);
         }
     }
@@ -94,16 +94,18 @@ impl TreeSsaRaiser {
     ) -> Expr {
         let ops = &inst.operands;
         let ty = if let Some(r) = inst.result {
-            src.get_type(r)
+            src.get_type_of(r)
         } else {
             Type::Void
         };
 
         match &inst.kind {
             ssa::InstKind::IConst(c) => {
-                dst.make_iconst(block, src.get_type(inst.result.unwrap()), *c)
+                dst.make_iconst(block, src.get_type_of(inst.result.unwrap()), *c)
             }
-            ssa::InstKind::FConst(bits) => dst.make_fconst(block, src.get_type(inst.result.unwrap()), *bits),
+            ssa::InstKind::FConst(bits) => {
+                dst.make_fconst(block, src.get_type_of(inst.result.unwrap()), *bits)
+            }
 
             ssa::InstKind::Add => {
                 dst.make_add(block, ty, &self.v(ops[0], dst), &self.v(ops[1], dst))
@@ -128,6 +130,9 @@ impl TreeSsaRaiser {
                 &self.v(ops[0], dst),
                 &self.v(ops[1], dst),
             ),
+            ssa::InstKind::Neg => {
+                dst.make_neg(block, ty, &self.v(ops[0], dst))
+            }
 
             ssa::InstKind::FAdd => {
                 dst.make_fadd(block, ty, &self.v(ops[0], dst), &self.v(ops[1], dst))
@@ -143,6 +148,9 @@ impl TreeSsaRaiser {
             }
             ssa::InstKind::FRem => {
                 dst.make_frem(block, ty, &self.v(ops[0], dst), &self.v(ops[1], dst))
+            }
+            ssa::InstKind::FNeg => {
+                dst.make_fneg(block, ty, &self.v(ops[0], dst))
             }
 
             ssa::InstKind::LShl => {
@@ -197,8 +205,14 @@ impl TreeSsaRaiser {
 
             ssa::InstKind::Cast(kind) => dst.make_cast(block, ty, *kind, &self.v(ops[0], dst)),
 
+            ssa::InstKind::Undef => dst.make_undef(block, ty),
+
+            ssa::InstKind::Select => {
+                dst.make_select(block, ty,  &self.v(ops[0], dst), &self.v(ops[1], dst), &self.v(ops[2], dst))
+            }
+
             ssa::InstKind::Ret | ssa::InstKind::Jump(_) | ssa::InstKind::JumpIf { .. } => {
-                todo!("{:?} has no fear equivalent", inst.kind)
+                todo!("{:?} must be handled by raise_terminator", inst.kind)
             }
         }
     }

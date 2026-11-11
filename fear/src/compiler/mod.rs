@@ -10,6 +10,7 @@ use inkwell::OptimizationLevel;
 
 #[derive(Debug, EnumDisplay, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum OutputType {
+    Text,
     #[cfg(feature = "llvm")]
     #[display("llvm-ir")]
     LlvmIr,
@@ -20,23 +21,51 @@ pub enum OutputType {
     Object,
 }
 
+impl OutputType {
+    pub fn is_text(&self) -> bool {
+        match self {
+            Self::Text => true,
+            #[cfg(feature = "llvm")]
+            Self::LlvmIr => true,
+            Self::Assembly => true,
+            _ => false,
+        }
+    }
+}
+
 /// Backend kind
-#[derive(Debug, EnumDisplay, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, EnumDisplay, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum Backend {
-    #[default]
+    #[display("dummy")]
+    Dummy,
     #[cfg(feature = "cranelift")]
     #[display("cranelift")]
     Cranelift,
-    #[display("fear")]
-    Fear,
     #[cfg(feature = "llvm")]
     #[display("llvm")]
     Llvm,
 }
 
 impl Backend {
+    #[allow(unreachable_code)]
+    pub fn first_available() -> Self {
+        #[cfg(feature = "cranelift")]
+        {
+            return Backend::Cranelift;
+        }
+
+        #[cfg(feature = "llvm")]
+        {
+            return Backend::Llvm;
+        }
+
+        Backend::Dummy
+    }
+
     pub fn select_for(output_type: OutputType) -> Option<Self> {
         match output_type {
+            OutputType::Text => Some(Self::Dummy),
+
             #[cfg(feature = "llvm")]
             OutputType::LlvmIr => Some(Self::Llvm),
 
@@ -71,10 +100,15 @@ impl Backend {
     pub fn supported_output_types(&self) -> &[OutputType] {
         match self {
             #[cfg(feature = "llvm")]
-            Self::Llvm => &[OutputType::LlvmIr, OutputType::Assembly, OutputType::Object],
+            Self::Llvm => &[
+                OutputType::Text,
+                OutputType::LlvmIr,
+                OutputType::Assembly,
+                OutputType::Object,
+            ],
             #[cfg(feature = "cranelift")]
-            Self::Cranelift => &[OutputType::Object],
-            Self::Fear => &[],
+            Self::Cranelift => &[OutputType::Text, OutputType::Object],
+            Self::Dummy => &[OutputType::Text],
         }
     }
 }
@@ -86,6 +120,7 @@ impl OutputType {
             Self::LlvmIr => "ll",
             Self::Assembly => "s",
             Self::Object => "o",
+            Self::Text => "ssa",
         }
     }
 }
@@ -118,8 +153,8 @@ pub fn has_backend(backend: Backend) -> bool {
         Backend::Llvm => crate::ssa::lowering::has_llvm(),
         #[cfg(feature = "cranelift")]
         Backend::Cranelift => crate::ssa::lowering::has_cranelift(),
-        Backend::Fear => {
-            /* not yet implemented */
+        Backend::Dummy => {
+            /* dummy */
             false
         }
     }
@@ -127,25 +162,41 @@ pub fn has_backend(backend: Backend) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct CompilerConfig {
+    /// target backend
     pub backend: Backend,
+    /// output type: object, assembly, etc
     pub output_type: OutputType,
+    /// target triple
     pub triple: Triple,
+    /// codegen-optimisation level
     pub opt_level: OptLevel,
+    /// position independent code
+    pub pic: bool,
+    /// -mcpu
+    pub cpu: Option<String>,
 }
 
 impl Default for CompilerConfig {
     fn default() -> Self {
         Self {
-            backend: Backend::Cranelift,
+            backend: Backend::select_for(OutputType::Object).unwrap_or(Backend::Dummy),
             output_type: OutputType::Object,
             triple: Triple::host(),
             opt_level: OptLevel::Default,
+            pic: true,
+            cpu: Some("generic".into()),
         }
     }
 }
 
 impl CompilerConfig {
-    pub fn setup(output_type: OutputType, triple: Triple, opt_level: OptLevel) -> Self {
+    pub fn setup(
+        output_type: OutputType,
+        triple: Triple,
+        opt_level: OptLevel,
+        pic: bool,
+        cpu: Option<&str>,
+    ) -> Self {
         let error_msg = format!("cannot select backend for {}", output_type);
         let backend = Backend::select_for(output_type).expect(&error_msg);
         Self {
@@ -153,6 +204,8 @@ impl CompilerConfig {
             output_type,
             triple,
             opt_level,
+            pic,
+            cpu: cpu.map(|s| s.into()),
         }
     }
 
@@ -183,16 +236,49 @@ pub fn compile_module<W: Write>(
         log::error!("compiling using invalid compiler-config");
     }
 
+    log::info!("compiling with opt-level: {:?}", config.opt_level);
+
     match (config.backend, config.output_type) {
+        (_, OutputType::Text) => {
+            writer.write_all(module.dump().as_bytes());
+            writer.flush();
+            Ok(())
+        }
         #[cfg(feature = "llvm")]
         (Backend::Llvm, ty) => {
             #[cfg(feature = "llvm")]
             {
-                use crate::ssa::lowering::llvm::LlvmLowerer;
-                use inkwell::context::Context;
+                use crate::ssa::lowering::llvm::{LlvmLowerer, LlvmTarget};
+                use inkwell::{
+                    context::Context,
+                    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetTriple},
+                };
 
+                Target::initialize_all(&InitializationConfig::default());
+
+                let triple = config.triple.clone();
+                let cpu = config.cpu.clone().unwrap_or("generic".into());
                 let llvm_ctx = Context::create();
-                let mut lowerer = LlvmLowerer::new(&module.name, config.triple.clone(), &llvm_ctx);
+
+                let target_triple = TargetTriple::create(&triple.to_string());
+                let target = Target::from_triple(&target_triple).expect("invalid target triple");
+                let target_machine = target
+                    .create_target_machine(
+                        &target_triple,
+                        &cpu,
+                        "",
+                        config.opt_level.into(),
+                        if config.pic {
+                            RelocMode::PIC
+                        } else {
+                            RelocMode::Static
+                        },
+                        CodeModel::Default,
+                    )
+                    .expect("failed to create TargetMachine");
+                let llvm_target = LlvmTarget::new(triple, target_machine);
+
+                let mut lowerer = LlvmLowerer::new(&module.name, &llvm_target, &llvm_ctx);
                 lowerer.lower_module(module);
                 let llvm_module = lowerer.get_module();
                 let target_machine = lowerer.get_target_machine();
@@ -230,6 +316,9 @@ pub fn compile_module<W: Write>(
                             .map_err(|e| format!("llvm target machine error: {:?}", e))?;
                         writer.write_all(buffer.as_slice())?;
                     }
+                    _ => {
+                        std::unreachable!();
+                    }
                 }
                 writer.flush()?;
                 Ok(())
@@ -248,18 +337,25 @@ pub fn compile_module<W: Write>(
                 use cranelift::codegen::settings::{self, Configurable};
                 use cranelift_module::default_libcall_names;
 
+                if let Some(cpu) = &config.cpu {
+                    log::warn!("cpu handling is not implemented in cranelift backend. ignoring");
+                }
+
                 let mut flag_builder = cranelift::codegen::settings::builder();
                 flag_builder
                     .set("use_colocated_libcalls", "false")
                     .map_err(|e| format!("cranelift config error: {:?}", e))?;
+
+                if config.pic {
+                    flag_builder
+                        .set("is_pic", "true")
+                        .map_err(|e| format!("cranelift config error: {:?}", e))?;
+                }
+
+                let opt_level = settings::OptLevel::from(config.opt_level);
+                log::debug!("cranelift opt-level is {}", opt_level);
                 flag_builder
-                    .set("is_pic", "true")
-                    .map_err(|e| format!("cranelift config error: {:?}", e))?;
-                flag_builder
-                    .set(
-                        "opt_level",
-                        &settings::OptLevel::from(config.opt_level).to_string(),
-                    )
+                    .set("opt_level", &opt_level.to_string())
                     .map_err(|e| format!("cranelift config error: {:?}", e))?;
 
                 let flags = cranelift::codegen::settings::Flags::new(flag_builder);
@@ -268,7 +364,12 @@ pub fn compile_module<W: Write>(
                     .finish(flags)
                     .map_err(|e| format!("failed to initialize cranelift isa: {}", e))?;
 
-                let mut lowerer = CraneliftLowerer::new(&module.name, isa, default_libcall_names());
+                let mut lowerer = CraneliftLowerer::new(
+                    &module.name,
+                    config.triple.clone(),
+                    isa,
+                    default_libcall_names(),
+                );
                 lowerer.lower_module(module);
                 let object_bytes = lowerer.finish();
 

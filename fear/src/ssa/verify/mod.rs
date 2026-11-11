@@ -97,63 +97,43 @@ impl Module {
         }
     }
 
-    fn verify_function(&self, id: FuncId, fun: &Function) -> Result<(), VerifyError> {
+    fn verify_function(&self, _id: FuncId, fun: &Function) -> Result<(), VerifyError> {
         let sig = fun.signature.clone();
         let f = fun.get_definition().unwrap();
 
-        // entry block verify
-        let entry = &f.blocks[&f.entry];
-
-        if entry.params != f.params {
-            log::error!(
-                "{}: entry.params = {:?}, f.params = {:?}",
-                fun.name,
-                entry.params,
-                f.params
-            );
-            return Err(VerifyError::BadEntryParams(id));
-        }
-        if entry.params.len() != sig.params.len() {
-            return Err(VerifyError::FuncArgCountMismatch(
-                id,
-                sig.params.len(),
-                entry.params.len(),
-            ));
-        }
-
         // block verify
-        for (bid, block) in &f.blocks {
-            if block.insts.is_empty() && block.term.is_none() {
+        for (bid, block) in f.get_blocks() {
+            if block.get_insts().is_empty() && block.get_terminator().is_none() {
                 return Err(VerifyError::EmptyBlock(*bid));
             }
 
-            if let Some(&last) = block.insts.last() {
+            if let Some(&last) = block.get_insts().last() {
                 let inst = f
-                    .insts
+                    .get_insts()
                     .get(&last)
                     .ok_or(VerifyError::InvalidInstInBlock(*bid, last))?;
 
-                if !inst.kind.is_terminator() && block.term.is_none() {
+                if !inst.kind.is_terminator() && block.get_terminator().is_none() {
                     return Err(VerifyError::InvalidTerminator(*bid));
                 }
             }
         }
 
-        for (id, inst) in &f.insts {
+        for (id, inst) in f.get_insts() {
             for &op in &inst.operands {
-                if !f.values.contains_key(&op) {
+                if !f.get_values().contains_key(&op) {
                     return Err(VerifyError::UndefinedValueUse(*id, op));
                 }
             }
 
             if let Some(res) = inst.result {
                 let val = f
-                    .values
+                    .get_values()
                     .get(&res)
                     .ok_or(VerifyError::InvalidResultValue(*id, res))?;
 
-                if val.def != *id {
-                    return Err(VerifyError::ValueDefMismatch(res, *id, val.def));
+                if val.get_def() != *id {
+                    return Err(VerifyError::ValueDefMismatch(res, *id, val.get_def()));
                 }
             } else {
                 if !inst.kind.is_terminator() && !matches!(inst.kind, InstKind::Store { .. }) {
@@ -196,7 +176,7 @@ impl Module {
 
                         // non-void function must have exactly one operand
                         (false, 1) => {
-                            let ret_ty = f.get_type(inst.operands[0]);
+                            let ret_ty = f.get_type_of(inst.operands[0]);
                             if ret_ty != sret_ty {
                                 return Err(VerifyError::RetTypeMismatch(*id, sret_ty, ret_ty));
                             }
@@ -210,11 +190,11 @@ impl Module {
 
                 InstKind::Jump(target) => {
                     let target_block = f
-                        .blocks
+                        .get_blocks()
                         .get(&target)
                         .ok_or(VerifyError::InvalidJumpTarget(target))?;
 
-                    let expected = target_block.params.len();
+                    let expected = target_block.get_params().len();
                     let actual = inst.operands.len();
 
                     if expected != actual {
@@ -223,10 +203,10 @@ impl Module {
 
                     // type checking
                     for (i, &op) in inst.operands.iter().enumerate() {
-                        let op_ty = f.get_type(op);
+                        let op_ty = f.get_type_of(op);
 
-                        let param_id = target_block.params[i];
-                        let param_ty = f.get_type(param_id);
+                        let param_id = target_block.get_params()[i];
+                        let param_ty = f.get_type_of(param_id);
 
                         if op_ty != param_ty {
                             return Err(VerifyError::JumpTypeMismatch(target, i, param_ty, op_ty));
@@ -241,17 +221,17 @@ impl Module {
                     let ops = f.get_jumpif_params(inst).unwrap();
 
                     let then_target = f
-                        .blocks
+                        .get_blocks()
                         .get(&then_block)
                         .ok_or(VerifyError::InvalidJumpTarget(then_block))?;
 
                     let else_target = f
-                        .blocks
+                        .get_blocks()
                         .get(&else_block)
                         .ok_or(VerifyError::InvalidJumpTarget(else_block))?;
 
                     let cond_val = inst.operands[0];
-                    let cond_ty = f.get_type(cond_val);
+                    let cond_ty = f.get_type_of(cond_val);
                     if cond_ty != Type::Int1 {
                         return Err(VerifyError::TypeMismatch {
                             expected: Type::Int1,
@@ -259,8 +239,8 @@ impl Module {
                         });
                     }
 
-                    let then_param_count = then_target.params.len();
-                    let else_param_count = else_target.params.len();
+                    let then_param_count = then_target.get_params().len();
+                    let else_param_count = else_target.get_params().len();
 
                     if then_param_count != ops.1.len() {
                         return Err(VerifyError::OperandCountMismatch(*id, then_param_count));
@@ -271,9 +251,9 @@ impl Module {
                     }
 
                     for (i, &op) in ops.1.iter().enumerate() {
-                        let op_ty = f.get_type(op);
-                        let param_id = then_target.params[i];
-                        let param_ty = f.get_type(param_id);
+                        let op_ty = f.get_type_of(op);
+                        let param_id = then_target.get_params()[i];
+                        let param_ty = f.get_type_of(param_id);
 
                         if op_ty != param_ty {
                             return Err(VerifyError::JumpTypeMismatch(
@@ -283,9 +263,9 @@ impl Module {
                     }
 
                     for (i, &op) in ops.2.iter().enumerate() {
-                        let op_ty = f.get_type(op);
-                        let param_id = else_target.params[i];
-                        let param_ty = f.get_type(param_id);
+                        let op_ty = f.get_type_of(op);
+                        let param_id = else_target.get_params()[i];
+                        let param_ty = f.get_type_of(param_id);
 
                         if op_ty != param_ty {
                             return Err(VerifyError::JumpTypeMismatch(
@@ -297,7 +277,7 @@ impl Module {
 
                 InstKind::Store { .. } | InstKind::Load { .. } => {
                     let expected = Type::Pointer;
-                    let actual = f.get_type(inst.operands[0]);
+                    let actual = f.get_type_of(inst.operands[0]);
                     if expected != actual {
                         return Err(VerifyError::TypeMismatch {
                             expected,
@@ -319,7 +299,7 @@ impl Module {
                     }
 
                     for (i, &op) in inst.operands.iter().enumerate() {
-                        let op_ty = f.get_type(op);
+                        let op_ty = f.get_type_of(op);
 
                         let param_ty = func.signature.params[i];
 
@@ -336,7 +316,7 @@ impl Module {
 
                     let vbase = inst.operands[0];
 
-                    let basety = f.get_type(vbase);
+                    let basety = f.get_type_of(vbase);
                     if basety != Type::Pointer {
                         return Err(VerifyError::TypeMismatch {
                             expected: Type::Pointer,
@@ -354,42 +334,42 @@ impl Module {
         }
 
         // verify values
-        for (vid, val) in &f.values {
+        for (vid, val) in f.get_values() {
             #[allow(clippy::collapsible_if)]
-            if val.def != InstId::MAX {
-                if !f.insts.contains_key(&val.def) {
-                    return Err(VerifyError::InvalidValueDef(*vid, val.def));
+            if val.get_def() != InstId::MAX {
+                if !f.get_insts().contains_key(&val.get_def()) {
+                    return Err(VerifyError::InvalidValueDef(*vid, val.get_def()));
                 }
             }
 
-            for u in &val.uses {
+            for u in val.get_uses() {
                 let inst = f
-                    .insts
-                    .get(&u.inst)
-                    .ok_or(VerifyError::InvalidUse(*vid, u.inst))?;
+                    .get_insts()
+                    .get(&u.get_inst())
+                    .ok_or(VerifyError::InvalidUse(*vid, u.get_index()))?;
 
-                if u.index as usize >= inst.operands.len() {
-                    return Err(VerifyError::UseIndexOutOfBounds(*vid, u.inst));
+                if u.get_index() as usize >= inst.operands.len() {
+                    return Err(VerifyError::UseIndexOutOfBounds(*vid, u.get_index()));
                 }
 
-                if inst.operands[u.index as usize] != *vid {
-                    return Err(VerifyError::UseMismatch(*vid, u.inst));
+                if inst.operands[u.get_index() as usize] != *vid {
+                    return Err(VerifyError::UseMismatch(*vid, u.get_inst()));
                 }
             }
         }
 
         // verify cfg
-        for (bid, block) in &f.blocks {
-            for &inst_id in &block.insts {
-                let inst = &f.insts[&inst_id];
+        for (bid, block) in f.get_blocks() {
+            for &inst_id in block.get_insts() {
+                let inst = f.get_inst(inst_id).unwrap();
 
                 match &inst.kind {
                     InstKind::Jump(target) => {
-                        if !f.blocks.contains_key(target) {
+                        if !f.get_blocks().contains_key(target) {
                             return Err(VerifyError::InvalidJumpTarget(*target));
                         }
 
-                        if !block.succs.contains(target) {
+                        if !block.get_succs().contains(target) {
                             return Err(VerifyError::CFGMissingEdge(*bid, *target));
                         }
                     }
@@ -398,19 +378,19 @@ impl Module {
                         then_block,
                         else_block,
                     } => {
-                        if !f.blocks.contains_key(then_block) {
+                        if !f.get_blocks().contains_key(then_block) {
                             return Err(VerifyError::InvalidJumpTarget(*then_block));
                         }
 
-                        if !block.succs.contains(then_block) {
+                        if !block.get_succs().contains(then_block) {
                             return Err(VerifyError::CFGMissingEdge(*bid, *then_block));
                         }
 
-                        if !f.blocks.contains_key(else_block) {
+                        if !f.get_blocks().contains_key(else_block) {
                             return Err(VerifyError::InvalidJumpTarget(*else_block));
                         }
 
-                        if !block.succs.contains(else_block) {
+                        if !block.get_succs().contains(else_block) {
                             return Err(VerifyError::CFGMissingEdge(*bid, *else_block));
                         }
                     }
@@ -426,8 +406,8 @@ impl Module {
             }
 
             // check preds/succs consistency
-            for succ in &block.succs {
-                if !f.blocks.contains_key(succ) {
+            for succ in block.get_succs() {
+                if !f.get_blocks().contains_key(succ) {
                     return Err(VerifyError::InvalidSuccessor(*bid, *succ));
                 }
             }

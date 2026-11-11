@@ -26,12 +26,16 @@ impl SsaRaiser {
     }
 
     pub fn raise_function(&mut self, src: &FunctionDef, dst: &mut crate::ssa::FunctionDef) {
-        let rpo = src.reverse_post_order();
+        let rpo = src.compute_rpo();
 
         for id in rpo.iter() {
             let block = &src.blocks[id];
             let is_entry = src.get_entry() == *id;
-            let did = if is_entry { dst.entry } else { dst.new_block() };
+            let did = if is_entry {
+                dst.get_entry()
+            } else {
+                dst.create_block()
+            };
             self.block_map.insert(*id, did);
             for p in &block.params {
                 let ty = src.values[p].ty;
@@ -124,8 +128,8 @@ impl SsaRaiser {
 
         match &e.kind {
             ExprKind::Var(v) => self.value_map[v],
-            ExprKind::Const(c) => dst.make_iconst(block, ty, *c),
-            ExprKind::FConst(c) => dst.make_fconst_bits(block, ty, *c),
+            ExprKind::Const(c) => dst.make_int_const(block, ty, *c),
+            ExprKind::FConst(c) => dst.make_float_const_from_bits(block, ty, *c),
 
             ExprKind::Call(func, params) => {
                 let params = params
@@ -164,72 +168,87 @@ impl SsaRaiser {
             ExprKind::Add(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_add(block, ty, l, r)
+                dst.make_int_add(block, ty, l, r)
             }
 
             ExprKind::Sub(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_sub(block, ty, l, r)
+                dst.make_int_sub(block, ty, l, r)
             }
 
             ExprKind::Mul(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_mul(block, ty, l, r)
+                dst.make_int_mul(block, ty, l, r)
             }
 
             ExprKind::Square(a) => {
-                log::warn!("bug. raising a square instruction, but this expression must be lowered from square(x) into mul(x, x)");
+                log::warn!(
+                    "bug. raising a square instruction, but this expression must be lowered from square(x) into mul(x, x)"
+                );
                 let l = self.raise_expr(a, dst, block);
-                dst.make_mul(block, ty, l, l)
+                dst.make_int_mul(block, ty, l, l)
             }
 
             ExprKind::Div(signed, a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_div(block, *signed, ty, l, r)
+                dst.make_int_div(block, *signed, ty, l, r)
             }
 
             ExprKind::Rem(signed, a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_rem(block, *signed, ty, l, r)
+                dst.make_int_rem(block, *signed, ty, l, r)
+            }
+
+            ExprKind::Neg(a) => {
+                let a = self.raise_expr(a, dst, block);
+                dst.make_int_neg(block, ty, a)
             }
 
             ExprKind::FAdd(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_fadd(block, ty, l, r)
+                dst.make_float_add(block, ty, l, r)
             }
 
             ExprKind::FSub(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_fsub(block, ty, l, r)
+                dst.make_float_sub(block, ty, l, r)
             }
 
             ExprKind::FMul(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_fmul(block, ty, l, r)
+                dst.make_float_mul(block, ty, l, r)
             }
 
             ExprKind::FDiv(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_fdiv(block, ty, l, r)
+                dst.make_float_div(block, ty, l, r)
             }
 
             ExprKind::FRem(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_frem(block, ty, l, r)
+                dst.make_float_rem(block, ty, l, r)
+            }
+
+            ExprKind::FNeg(a) => {
+                let a = self.raise_expr(a, dst, block);
+                dst.make_float_neg(block, ty, a)
             }
 
             ExprKind::FSquare(a) => {
+                log::warn!(
+                    "bug. raising a float square instruction, but this expression must be lowered from fsquare(x) into fmul(x, x)"
+                );
                 let l = self.raise_expr(a, dst, block);
-                dst.make_fmul(block, ty, l, l)
+                dst.make_float_mul(block, ty, l, l)
             }
 
             ExprKind::BitShl(a, b) => {
@@ -253,41 +272,49 @@ impl SsaRaiser {
             ExprKind::BitAnd(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_and(block, ty, l, r)
+                dst.make_bitand(block, ty, l, r)
             }
 
             ExprKind::BitOr(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_or(block, ty, l, r)
+                dst.make_bitor(block, ty, l, r)
             }
 
             ExprKind::BitXor(a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_xor(block, ty, l, r)
+                dst.make_bitxor(block, ty, l, r)
             }
 
             ExprKind::BitNeg(a) => {
                 let v = self.raise_expr(a, dst, block);
-                dst.make_not(block, ty, v)
+                dst.make_bitnot(block, ty, v)
             }
 
             ExprKind::Cmp(kind, a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_cmp(block, *kind, l, r)
+                dst.make_int_cmp(block, *kind, l, r)
             }
 
             ExprKind::FCmp(kind, a, b) => {
                 let l = self.raise_expr(a, dst, block);
                 let r = self.raise_expr(b, dst, block);
-                dst.make_fcmp(block, *kind, l, r)
+                dst.make_float_cmp(block, *kind, l, r)
             }
 
             ExprKind::Cast(kind, a) => {
                 let l = self.raise_expr(a, dst, block);
                 dst.make_cast(block, *kind, ty, l)
+            }
+
+            ExprKind::Undef => dst.make_undef(block, ty),
+            ExprKind::Select(c, t, e) => {
+                let c = self.raise_expr(c, dst, block);
+                let t = self.raise_expr(t, dst, block);
+                let e = self.raise_expr(e, dst, block);
+                dst.make_select(block, ty, c, t, e)
             }
         }
     }

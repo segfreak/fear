@@ -13,53 +13,66 @@ fn build_use_counts(func: &FunctionDef) -> HashMap<ValueId, usize> {
 }
 
 fn collect_uses(expr: &Expr, uses: &mut HashMap<ValueId, usize>) {
+    // match &expr.kind {
+    //     ExprKind::Var(v) => {
+    //         *uses.entry(*v).or_insert(0) += 1;
+    //     }
+
+    //     ExprKind::Const(_)
+    //     | ExprKind::FConst(_)
+    //     | ExprKind::Alloca(_)
+    //     | ExprKind::NAlloca(_, _) => {}
+
+    //     ExprKind::Undef => {}
+
+    //     ExprKind::Square(a)
+    //     | ExprKind::FSquare(a)
+    //     | ExprKind::Cast(_, a)
+    //     | ExprKind::BitNeg(a)
+    //     | ExprKind::Load(_, a) => {
+    //         collect_uses(a, uses);
+    //     }
+
+    //     ExprKind::Call(_, params) => {
+    //         for expr in params {
+    //             collect_uses(expr, uses);
+    //         }
+    //     }
+
+    //     ExprKind::Add(a, b)
+    //     | ExprKind::Sub(a, b)
+    //     | ExprKind::Mul(a, b)
+    //     | ExprKind::Div(_, a, b)
+    //     | ExprKind::Rem(_, a, b)
+    //     | ExprKind::FAdd(a, b)
+    //     | ExprKind::FSub(a, b)
+    //     | ExprKind::FMul(a, b)
+    //     | ExprKind::FDiv(a, b)
+    //     | ExprKind::FRem(a, b)
+    //     | ExprKind::BitShl(a, b)
+    //     | ExprKind::BitShr(a, b)
+    //     | ExprKind::ArithShr(a, b)
+    //     | ExprKind::BitAnd(a, b)
+    //     | ExprKind::BitOr(a, b)
+    //     | ExprKind::BitXor(a, b)
+    //     | ExprKind::Cmp(_, a, b)
+    //     | ExprKind::FCmp(_, a, b)
+    //     | ExprKind::Store(_, a, b)
+    //     | ExprKind::PtrOffset(a, b)
+    //     | ExprKind::ElementPtr(_, a, b) => {
+    //         collect_uses(a, uses);
+    //         collect_uses(b, uses);
+    //     }
+    // }
     match &expr.kind {
         ExprKind::Var(v) => {
             *uses.entry(*v).or_insert(0) += 1;
         }
 
-        ExprKind::Const(_)
-        | ExprKind::FConst(_)
-        | ExprKind::Alloca(_)
-        | ExprKind::NAlloca(_, _) => {}
-
-        ExprKind::Square(a)
-        | ExprKind::FSquare(a)
-        | ExprKind::Cast(_, a)
-        | ExprKind::BitNeg(a)
-        | ExprKind::Load(_, a) => {
-            collect_uses(a, uses);
-        }
-
-        ExprKind::Call(_, params) => {
-            for expr in params {
+        _ => {
+            for expr in &expr.kind.get_operands() {
                 collect_uses(expr, uses);
             }
-        }
-
-        ExprKind::Add(a, b)
-        | ExprKind::Sub(a, b)
-        | ExprKind::Mul(a, b)
-        | ExprKind::Div(_, a, b)
-        | ExprKind::Rem(_, a, b)
-        | ExprKind::FAdd(a, b)
-        | ExprKind::FSub(a, b)
-        | ExprKind::FMul(a, b)
-        | ExprKind::FDiv(a, b)
-        | ExprKind::FRem(a, b)
-        | ExprKind::BitShl(a, b)
-        | ExprKind::BitShr(a, b)
-        | ExprKind::ArithShr(a, b)
-        | ExprKind::BitAnd(a, b)
-        | ExprKind::BitOr(a, b)
-        | ExprKind::BitXor(a, b)
-        | ExprKind::Cmp(_, a, b)
-        | ExprKind::FCmp(_, a, b)
-        | ExprKind::Store(_, a, b)
-        | ExprKind::PtrOffset(a, b)
-        | ExprKind::ElementPtr(_, a, b) => {
-            collect_uses(a, uses);
-            collect_uses(b, uses);
         }
     }
 }
@@ -106,22 +119,26 @@ pub fn expressify(func: &mut FunctionDef) -> bool {
 fn should_inline(
     func: &FunctionDef,
     v: ValueId,
-    uses: &HashMap<ValueId, usize>,
+    _uses: &HashMap<ValueId, usize>,
     params: &HashSet<ValueId>,
 ) -> bool {
     if params.contains(&v) {
+        // cannot inline a block-parameter value-id
         return false;
     }
 
-    matches!(func.get_expr(v).kind, ExprKind::Const(_))
-        || matches!(uses.get(&v), Some(&1))
-            && !matches!(
-                func.get_expr(v).kind,
-                ExprKind::Alloca(_)
-                    | ExprKind::Load(_, _)
-                    | ExprKind::Store(_, _, _)
-                    | ExprKind::Call(_, _)
-            )
+    // matches!(
+    // func.get_expr(v).kind, ExprKind::Const(_)
+    // || matches!(_uses.get(&v), Some(&1))
+    // );
+
+    !matches!(
+        func.get_expr(v).kind,
+        ExprKind::Alloca(_)
+            | ExprKind::Load(_, _)
+            | ExprKind::Store(_, _, _)
+            | ExprKind::Call(_, _)
+    )
 }
 
 fn expand_value(
@@ -162,6 +179,25 @@ fn expand_expr(
             }
         }
 
+        ExprKind::Neg(a) => {
+            let a = expand_expr(func, *a, cache, uses, params, changed);
+            ExprKind::Neg(Box::new(a))
+        }
+
+        ExprKind::FNeg(a) => {
+            let a = expand_expr(func, *a, cache, uses, params, changed);
+            ExprKind::Neg(Box::new(a))
+        }
+
+        ExprKind::Undef => expr.kind,
+
+        ExprKind::Select(c, t, e) => {
+            let c = expand_expr(func, *c, cache, uses, params, changed);
+            let t = expand_expr(func, *t, cache, uses, params, changed);
+            let e = expand_expr(func, *e, cache, uses, params, changed);
+            ExprKind::Select(Box::new(c), Box::new(t), Box::new(e))
+        }
+
         ExprKind::Alloca(ty) => ExprKind::Alloca(ty),
         ExprKind::NAlloca(ty, cnt) => ExprKind::NAlloca(ty, cnt),
         ExprKind::Call(func, params) => ExprKind::Call(func, params),
@@ -187,8 +223,8 @@ fn expand_expr(
         }
         ExprKind::Store(volatile, ptr, value) => {
             let ptr = expand_expr(func, *ptr, cache, uses, params, changed);
-            // let value = expand_expr(func, *value, cache, uses, params, changed);
-            ExprKind::Store(volatile, Box::new(ptr), value.clone())
+            let value = expand_expr(func, *value, cache, uses, params, changed);
+            ExprKind::Store(volatile, Box::new(ptr), Box::new(value.clone()))
         }
 
         ExprKind::Cmp(kind, a, b) => {

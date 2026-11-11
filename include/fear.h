@@ -7,19 +7,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 /**
  * Fear backend type
  */
 typedef enum FearBackend {
-  /**
-   * default backend
-   */
+  FearBackendDummy,
   FearBackendCranelift,
-  /**
-   * not yet implemented
-   */
-  FearBackendSelf,
   FearBackendLlvm,
 } FearBackend;
 
@@ -57,6 +52,10 @@ typedef enum FearIntCmp {
   FearIntCmpLe,
   FearIntCmpGt,
   FearIntCmpGe,
+  FearIntCmpULt,
+  FearIntCmpULe,
+  FearIntCmpUGt,
+  FearIntCmpUGe,
 } FearIntCmp;
 
 /**
@@ -104,14 +103,14 @@ typedef struct FearModule {
   int8_t __[0];
 } FearModule;
 
-typedef uint32_t FearBlockId;
-
 /**
  * Opaque wrapper for the internal `FunctionDef` struct, used to build function bodies.
  */
 typedef struct FearFunctionDef {
   int8_t __[0];
 } FearFunctionDef;
+
+typedef uint32_t FearBlockId;
 
 typedef uint32_t FearValueId;
 
@@ -129,7 +128,7 @@ bool fearHasBackend(enum FearBackend backend);
 /**
  * Initialising logging system
  */
-int32_t fearInitialiseLogging(void);
+int32_t fearInitLogging(void);
 
 /**
  * Select any backend
@@ -144,32 +143,94 @@ enum FearBackend fearSelectBackend(void);
 enum FearBackend fearSelectBackendForObject(void);
 
 /**
- * Compiles a `FearModule` into a native machine object file via target backend, streaming to a raw file descriptor.
+ * Compiles a `FearModule` into a native machine object file via target backend,
+ *  streaming to a raw file descriptor.
+ *
+ * Parameters:
+ * - `triple`: target triple (e.g. `"x86_64-unknown-linux-gnu"`).
+ *   If `NULL`, the host target triple is used.
+ * - `cpu`: target CPU name (e.g. `"tigerlake"`, `"znver4"`).
+ *   If `NULL`, the backend default generic CPU is used.
+ * - `fd`: writable file descriptor that receives the generated object file.
+ *
+ * Returns:
+ * - `0` on success.
+ * - non-zero on compilation failure.
  */
 int fearEmitObject(struct FearModule *m,
                    enum FearBackend backend,
                    enum FearOptLevel opt,
-                   int fd);
+                   bool pic,
+                   const char *triple,
+                   const char *cpu,
+                   FILE *stream);
 
 /**
  * Supported backends: FearBackendLlvm
- * Compiles a `FearModule` into a native machine assembly file via target backend, streaming to a raw file descriptor.
+ * Compiles a `FearModule` into a native machine assembly file via target backend,
+ *  streaming to a raw file descriptor.
+ *
+ * Parameters:
+ * - `triple`: target triple (e.g. `"x86_64-unknown-linux-gnu"`).
+ *   If `NULL`, the host target triple is used.
+ * - `cpu`: target CPU name (e.g. `"tigerlake"`, `"znver4"`).
+ *   If `NULL`, the backend default generic CPU is used.
+ * - `fd`: writable file descriptor that receives the generated object file.
+ *
+ * Returns:
+ * - `0` on success.
+ * - non-zero on compilation failure.
  */
 int fearEmitAssembly(struct FearModule *m,
                      enum FearBackend backend,
                      enum FearOptLevel opt,
-                     int fd);
+                     bool pic,
+                     const char *triple,
+                     const char *cpu,
+                     FILE *stream);
 
 /**
  * Writes a readable, plain-text representation of the module's IR into a file descriptor.
  */
-void fearDumpToFile(struct FearModule *m, int fd);
+void fearDumpToFile(struct FearModule *m, FILE *stream);
+
+/**
+ * Writes a readable, plain-text representation of the module's IR into a C String.
+ * Needs to fearStringDispose()
+ */
+char *fearDumpToString(struct FearModule *m);
+
+/**
+ * Writes a 'dot' representation of the CFG into a file descriptor.
+ */
+void fearDumpCfgToFile(struct FearFunctionDef *def, FILE *stream);
+
+/**
+ * Writes a 'dot' representation of the CFG into a C String.
+ * Needs to fearStringDispose()
+ */
+char *fearDumpCfgToString(struct FearFunctionDef *def);
+
+/**
+ * Frees rust-side allocated string
+ */
+void fearStringDispose(char *s);
 
 /**
  * Serializes the module into the compiler's native binary format and outputs it to a file descriptor.
  */
 void fearBinaryDumpToFile(struct FearModule *m,
-                          int fd);
+                          FILE *stream);
+
+/**
+ * Serializes the module into the compiler's native binary format and outputs it to a sized buffer.
+ */
+uint8_t *fearBinaryDumpToBuffer(struct FearModule *m, uintptr_t *out_size);
+
+/**
+ * Frees rust-side allocated buffer
+ */
+void fearBufferDispose(uint8_t *ptr, uintptr_t size);
 
 /**
  * Creates a new basic block inside the function to build branches or loops.
@@ -179,12 +240,12 @@ FearBlockId fearCreateBlock(struct FearFunctionDef *f);
 /**
  * Adds a top-level input parameter to the function declaration.
  */
-FearBlockId fearCreateFuncParam(struct FearFunctionDef *f, enum FearType ty);
+FearValueId fearCreateFuncParam(struct FearFunctionDef *f, enum FearType ty);
 
 /**
  * Appends a parameter to a specific basic block, used to pass values in SSA form (instead of PHI nodes).
  */
-FearBlockId fearCreateBlockParam(struct FearFunctionDef *f,
+FearValueId fearCreateBlockParam(struct FearFunctionDef *f,
                                  FearBlockId block,
                                  enum FearType ty);
 
@@ -195,6 +256,22 @@ FearValueId fearCreateIntConst(struct FearFunctionDef *f,
                                FearBlockId parent,
                                enum FearType ty,
                                int64_t val);
+
+/**
+ * Generates an float constant value from raw bits inside a target basic block.
+ */
+FearValueId fearCreateFloatConstFromBits(struct FearFunctionDef *f,
+                                         FearBlockId parent,
+                                         enum FearType ty,
+                                         uint64_t val);
+
+/**
+ * Generates an float constant value inside a target basic block.
+ */
+FearValueId fearCreateFloatConst(struct FearFunctionDef *f,
+                                 FearBlockId parent,
+                                 enum FearType ty,
+                                 double val);
 
 /**
  * Emits an instruction to allocate stack space for a local variable of the specified type.
@@ -340,46 +417,46 @@ FearValueId fearCreateFloatRem(struct FearFunctionDef *f,
                                FearValueId a,
                                FearValueId b);
 
-FearValueId fearCreateBitwiseNot(struct FearFunctionDef *f,
-                                 FearBlockId parent,
-                                 enum FearType ty,
-                                 FearValueId v);
+FearValueId fearCreateBitNot(struct FearFunctionDef *f,
+                             FearBlockId parent,
+                             enum FearType ty,
+                             FearValueId v);
 
-FearValueId fearCreateBitwiseAnd(struct FearFunctionDef *f,
-                                 FearBlockId parent,
-                                 enum FearType ty,
-                                 FearValueId a,
-                                 FearValueId b);
+FearValueId fearCreateBitAnd(struct FearFunctionDef *f,
+                             FearBlockId parent,
+                             enum FearType ty,
+                             FearValueId a,
+                             FearValueId b);
 
-FearValueId fearCreateBitwiseOr(struct FearFunctionDef *f,
-                                FearBlockId parent,
-                                enum FearType ty,
-                                FearValueId a,
-                                FearValueId b);
+FearValueId fearCreateBitOr(struct FearFunctionDef *f,
+                            FearBlockId parent,
+                            enum FearType ty,
+                            FearValueId a,
+                            FearValueId b);
 
-FearValueId fearCreateBitwiseXor(struct FearFunctionDef *f,
-                                 FearBlockId parent,
-                                 enum FearType ty,
-                                 FearValueId a,
-                                 FearValueId b);
+FearValueId fearCreateBitXor(struct FearFunctionDef *f,
+                             FearBlockId parent,
+                             enum FearType ty,
+                             FearValueId a,
+                             FearValueId b);
 
-FearValueId fearCreateLogicalShiftLeft(struct FearFunctionDef *f,
-                                       FearBlockId parent,
-                                       enum FearType ty,
-                                       FearValueId a,
-                                       FearValueId b);
+FearValueId fearCreateShl(struct FearFunctionDef *f,
+                          FearBlockId parent,
+                          enum FearType ty,
+                          FearValueId a,
+                          FearValueId b);
 
-FearValueId fearCreateLogicalShiftRight(struct FearFunctionDef *f,
-                                        FearBlockId parent,
-                                        enum FearType ty,
-                                        FearValueId a,
-                                        FearValueId b);
+FearValueId fearCreateShr(struct FearFunctionDef *f,
+                          FearBlockId parent,
+                          enum FearType ty,
+                          FearValueId a,
+                          FearValueId b);
 
-FearValueId fearCreateArithShiftRight(struct FearFunctionDef *f,
-                                      FearBlockId parent,
-                                      enum FearType ty,
-                                      FearValueId a,
-                                      FearValueId b);
+FearValueId fearCreateArithShr(struct FearFunctionDef *f,
+                               FearBlockId parent,
+                               enum FearType ty,
+                               FearValueId a,
+                               FearValueId b);
 
 /**
  * Terminates a block with an unconditional jump to another basic block, passing arguments to its block parameters.
@@ -512,6 +589,24 @@ void fearCreateRet(struct FearFunctionDef *f, FearBlockId parent, FearValueId v)
 void fearCreateRetVoid(struct FearFunctionDef *f, FearBlockId parent);
 
 /**
+ * Emits an instruction to create an undefined value of the specified type, which can be used as a placeholder or for optimization purposes.
+ * Cranelift: undef its a read from uninitialized stack slot.
+ */
+FearValueId fearCreateUndef(struct FearFunctionDef *f,
+                            FearBlockId parent,
+                            enum FearType ty);
+
+/**
+ * Emits a instruction to select one of two values based on a condition, similar to the ternary operator `cond ? then_value : else_value`.
+ */
+FearValueId fearCreateSelect(struct FearFunctionDef *f,
+                             FearBlockId parent,
+                             enum FearType ty,
+                             FearValueId cond,
+                             FearValueId then_value,
+                             FearValueId else_value);
+
+/**
  * Declares a function prototype inside the module. Returns a unique function identifier.
  */
 FearFuncId fearDeclareFunction(struct FearModule *m,
@@ -561,7 +656,7 @@ struct FearModule *fearModuleCreate(const char *name);
 /**
  * Deserializes a complete `Module` structure from an input file descriptor. Returns null on error.
  */
-struct FearModule *fearReadBinaryFromFile(int fd);
+struct FearModule *fearReadBinaryFromFile(FILE *stream);
 
 /**
  * Reclaims ownership of a `FearModule` pointer and drops it, freeing all associated heap memory.

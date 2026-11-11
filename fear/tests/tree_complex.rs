@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::PathBuf;
 
 use fear::compiler::CompilerConfig;
 use fear::tree::passes::PassManager;
@@ -91,7 +92,7 @@ pub fn complex() {
 
     let mut f = test_def();
 
-    log::debug!("before opts: {}", f.dump());
+    log::debug!("before opts:\n{}", f.dump());
 
     let pipeline = Pipeline::with_level(128, OptLevel::Default);
 
@@ -115,8 +116,9 @@ pub fn complex() {
         m.verify().expect("verify error");
         println!("{}", m.dump());
 
-        fear::binary::write_to_file(&m, "treessa.bin").expect("cannot write fear binary module");
-        std::fs::write("treessa.ssa", m.dump()).expect("cannot write fear text module");
+        fear::binary::write_to_file(&m, &PathBuf::from("treessac.bin"))
+            .expect("cannot write fear binary module");
+        std::fs::write("treessac.ssa", m.dump()).expect("cannot write fear text module");
     }
 
     {
@@ -124,6 +126,8 @@ pub fn complex() {
             fear::compiler::OutputType::Object,
             target_lexicon::Triple::host(),
             OptLevel::Full,
+            true,
+            None,
         );
         let file = File::create("faz.o").unwrap();
         let writer = BufWriter::new(file);

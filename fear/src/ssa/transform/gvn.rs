@@ -40,15 +40,17 @@ impl GvnCtx {
     fn fresh_vn(&mut self) -> VN {
         let vn = VN(self.next_vn);
         self.next_vn += 1;
+        log::trace!("fresh_vn -> {:?}", vn);
         vn
     }
 
     fn vn_of(&mut self, v: ValueId, func: &FunctionDef) -> VN {
         if let Some(&vn) = self.value_vn.get(&v) {
+            log::trace!("vn_of %{} -> cached {:?}", v, vn);
             return vn;
         }
 
-        let val = match func.values.get(&v) {
+        let val = match func.get_value(v) {
             Some(v) => v,
             None => {
                 let vn = self.fresh_vn();
@@ -57,12 +59,12 @@ impl GvnCtx {
             }
         };
 
-        let key = if val.def == InstId::MAX {
+        let key = if val.get_def() == InstId::MAX {
             ValueKey::Param(v)
         } else {
-            match func.insts.get(&val.def).map(|i| &i.kind) {
-                Some(InstKind::IConst(x)) => ValueKey::IConst(*x, val.ty),
-                Some(InstKind::FConst(x)) => ValueKey::FConst(*x, val.ty),
+            match func.get_inst(val.get_def()).map(|i| &i.kind) {
+                Some(InstKind::IConst(x)) => ValueKey::IConst(*x, val.get_type()),
+                Some(InstKind::FConst(x)) => ValueKey::FConst(*x, val.get_type()),
                 _ => {
                     let vn = self.fresh_vn();
                     self.value_vn.insert(v, vn);
@@ -120,7 +122,7 @@ fn make_key(
     }
 
     let result = inst.result?;
-    let result_ty = func.get_type(result);
+    let result_ty = func.get_type_of(result);
 
     let resolved_ops: Vec<ValueId> = inst.operands.iter().map(|&v| resolve(v, repl)).collect();
     let ops = canonicalize(&inst.kind, resolved_ops);
@@ -128,7 +130,7 @@ fn make_key(
     let args: Vec<(VN, Type)> = ops
         .into_iter()
         .map(|v| {
-            let ty = func.get_type(v);
+            let ty = func.get_type_of(v);
             let vn = ctx.vn_of(v, func);
             (vn, ty)
         })
@@ -159,13 +161,13 @@ fn collect_gvn(
 ) {
     let scope_start = scope_keys.len();
 
-    let insts = match func.blocks.get(&block) {
+    let insts = match func.get_block(block) {
         Some(b) => b.insts.clone(),
         None => return,
     };
 
     for inst_id in insts {
-        let inst = match func.insts.get(&inst_id) {
+        let inst = match func.get_inst(inst_id) {
             Some(i) => i.clone(),
             None => continue,
         };
@@ -191,6 +193,10 @@ fn collect_gvn(
                     if canonical != result {
                         repl.insert(result, canonical);
                         let vn = ctx.vn_of(canonical, func);
+                        ctx.assign_vn(result, vn);
+                    } else {
+                        // Same instruction, assign same value number
+                        let vn = ctx.vn_of(result, func);
                         ctx.assign_vn(result, vn);
                     }
                 } else {
@@ -223,10 +229,10 @@ fn apply_replacements(func: &mut FunctionDef, repl: &HashMap<ValueId, ValueId>) 
         log::trace!(
             "replacing %{}:{} ({:?}) -> %{}:{} ({:?})",
             result,
-            func.get_type(result),
+            func.get_type_of(result),
             func.get_value_def_in(result).unwrap(),
             canonical,
-            func.get_type(canonical),
+            func.get_type_of(canonical),
             func.get_value_def_in(canonical).unwrap(),
         );
         func.replace_uses(result, canonical);
@@ -247,7 +253,7 @@ pub fn gvn(module: &mut Module, f: FuncId) -> bool {
 
     let dom = Dominance::build(func);
     let dom_children = build_dom_children(&dom);
-    let entry = func.entry;
+    let entry = func.get_entry();
 
     let mut ctx = GvnCtx::new();
     let mut repl: HashMap<ValueId, ValueId> = HashMap::new();

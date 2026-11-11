@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
 };
 
 pub type ValueId = u32;
@@ -35,6 +35,7 @@ pub enum ExprKind {
     Div(bool, Box<Expr>, Box<Expr>),
     Rem(bool, Box<Expr>, Box<Expr>),
     Square(Box<Expr>),
+    Neg(Box<Expr>),
 
     FAdd(Box<Expr>, Box<Expr>),
     FSub(Box<Expr>, Box<Expr>),
@@ -42,6 +43,7 @@ pub enum ExprKind {
     FDiv(Box<Expr>, Box<Expr>),
     FRem(Box<Expr>, Box<Expr>),
     FSquare(Box<Expr>),
+    FNeg(Box<Expr>),
 
     BitShl(Box<Expr>, Box<Expr>),
     BitShr(Box<Expr>, Box<Expr>),
@@ -72,6 +74,13 @@ pub enum ExprKind {
     ),
 
     Call(/* using fear modules */ crate::ssa::FuncId, Vec<Expr>),
+
+    Undef,
+    Select(
+        /* cond */ Box<Expr>,
+        /* then value */ Box<Expr>,
+        /* else value */ Box<Expr>,
+    ),
 }
 
 impl From<ValueId> for ExprKind {
@@ -82,7 +91,7 @@ impl From<ValueId> for ExprKind {
 
 impl ExprKind {
     pub fn get_operands(&self) -> Vec<Expr> {
-        let tmp = match self {
+        match self {
             Self::Var(_) => vec![],
             Self::Const(_) | Self::FConst(_) => vec![],
 
@@ -116,7 +125,9 @@ impl ExprKind {
             | Self::FSquare(v)
             | Self::BitNeg(v)
             | Self::Cast(_, v)
-            | Self::Load(_, v) => {
+            | Self::Load(_, v)
+            | Self::Neg(v)
+            | Self::FNeg(v) => {
                 vec![v.as_ref().clone()]
             }
 
@@ -128,18 +139,69 @@ impl ExprKind {
 
             Self::Alloca(_) => vec![],
             Self::NAlloca(_, _) => vec![],
-        };
+            Self::Undef => vec![],
 
-        log::trace!(
-            "count of expression '{}' operands = {}",
-            FunctionDef::fmt_expr(&Expr {
-                ty: Type::Void,
-                kind: self.clone()
-            },),
-            tmp.len()
-        );
+            Self::Select(c, t, e) => {
+                vec![c.as_ref().clone(), t.as_ref().clone(), e.as_ref().clone()]
+            }
+        }
+    }
 
-        tmp
+    pub fn get_operands_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Self::Var(_) => vec![],
+            Self::Const(_) | Self::FConst(_) => vec![],
+
+            Self::Add(a, b)
+            | Self::Sub(a, b)
+            | Self::Mul(a, b)
+            | Self::FAdd(a, b)
+            | Self::FSub(a, b)
+            | Self::FMul(a, b)
+            | Self::FDiv(a, b)
+            | Self::FRem(a, b)
+            | Self::BitShl(a, b)
+            | Self::BitShr(a, b)
+            | Self::ArithShr(a, b)
+            | Self::BitAnd(a, b)
+            | Self::BitOr(a, b)
+            | Self::BitXor(a, b)
+            | Self::PtrOffset(a, b) => {
+                vec![a.as_mut(), b.as_mut()]
+            }
+
+            Self::Div(_, a, b)
+            | Self::Rem(_, a, b)
+            | Self::Cmp(_, a, b)
+            | Self::FCmp(_, a, b)
+            | Self::ElementPtr(_, a, b) => {
+                vec![a.as_mut(), b.as_mut()]
+            }
+
+            Self::Square(v)
+            | Self::FSquare(v)
+            | Self::BitNeg(v)
+            | Self::Cast(_, v)
+            | Self::Load(_, v)
+            | Self::Neg(v)
+            | Self::FNeg(v) => {
+                vec![v.as_mut()]
+            }
+
+            Self::Store(_, ptr, value) => {
+                vec![ptr.as_mut(), value.as_mut()]
+            }
+
+            Self::Call(_, args) => args.iter_mut().collect(),
+
+            Self::Alloca(_) => vec![],
+            Self::NAlloca(_, _) => vec![],
+            Self::Undef => vec![],
+
+            Self::Select(c, t, e) => {
+                vec![c.as_mut(), t.as_mut(), e.as_mut()]
+            }
+        }
     }
 
     pub fn is_volatile(&self) -> bool {
@@ -193,6 +255,7 @@ impl ExprKind {
     pub fn get_cost(&self) -> u32 {
         match self {
             Self::Var(_) | Self::Const(_) | Self::FConst(_) => 0,
+            Self::Undef => 0,
 
             Self::Add(a, b) | Self::Sub(a, b) => 1 + a.get_cost() + b.get_cost(),
             Self::BitShl(a, b)
@@ -221,11 +284,15 @@ impl ExprKind {
             Self::FCmp(_, a, b) => 4 + a.get_cost() + b.get_cost(),
             Self::Cast(kind, a) => Self::cast_cost(*kind) + a.get_cost(),
 
+            Self::Neg(a) | Self::FNeg(a) => 1 + a.get_cost(),
+
             Self::Alloca(_) | ExprKind::NAlloca(_, _) => 2,
             Self::PtrOffset(_, _) | Self::ElementPtr(_, _, _) => 2,
             Self::Load(_, _) | Self::Store(_, _, _) => 5,
 
-            Self::Call(_, _) => 30,
+            Self::Call(_, _) => 50,
+
+            Self::Select(c, t, e) => 2 + c.get_cost() + t.get_cost() + e.get_cost(),
         }
     }
 }
@@ -266,6 +333,31 @@ pub struct FunctionDef {
     entry: BlockId,
 }
 
+impl Hash for FunctionDef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.next_value.hash(state);
+        self.next_block.hash(state);
+
+        let mut blocks: Vec<_> = self.blocks.iter().collect();
+        blocks.sort_by_key(|(id, _)| *id);
+
+        for (id, block) in blocks {
+            id.hash(state);
+            block.hash(state);
+        }
+
+        let mut values: Vec<_> = self.values.iter().collect();
+        values.sort_by_key(|(id, _)| *id);
+
+        for (id, value) in values {
+            id.hash(state);
+            value.hash(state);
+        }
+
+        self.entry.hash(state);
+    }
+}
+
 impl FunctionDef {
     pub fn new() -> Self {
         let mut t = Self::default();
@@ -273,7 +365,13 @@ impl FunctionDef {
         t
     }
 
-    pub fn reverse_post_order(&self) -> Vec<BlockId> {
+    pub fn get_hash(&self) -> u64 {
+        let mut state = crate::DefaultHasher::new();
+        self.hash(&mut state);
+        state.finish()
+    }
+
+    pub fn compute_rpo(&self) -> Vec<BlockId> {
         fn dfs(
             f: &FunctionDef,
             b: BlockId,
@@ -311,33 +409,6 @@ impl FunctionDef {
 
         post.reverse();
         post
-    }
-
-    pub fn dirty_hash(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-
-        self.next_value.hash(&mut hasher);
-        self.next_block.hash(&mut hasher);
-
-        let mut blocks: Vec<_> = self.blocks.iter().collect();
-        blocks.sort_by_key(|(id, _)| *id);
-
-        for (id, block) in blocks {
-            id.hash(&mut hasher);
-            block.hash(&mut hasher);
-        }
-
-        let mut values: Vec<_> = self.values.iter().collect();
-        values.sort_by_key(|(id, _)| *id);
-
-        for (id, value) in values {
-            id.hash(&mut hasher);
-            value.hash(&mut hasher);
-        }
-
-        self.entry.hash(&mut hasher);
-
-        hasher.finish()
     }
 
     pub fn get_entry(&self) -> BlockId {
@@ -408,6 +479,37 @@ impl FunctionDef {
             ty,
             kind: ExprKind::Var(vid),
         }
+    }
+
+    pub fn make_undef(&mut self, block: BlockId, ty: Type) -> Expr {
+        self.append_expr(
+            block,
+            Expr {
+                ty,
+                kind: ExprKind::Undef,
+            },
+        )
+    }
+
+    pub fn make_select(
+        &mut self,
+        block: BlockId,
+        ty: Type,
+        cond: &Expr,
+        then_value: &Expr,
+        else_value: &Expr,
+    ) -> Expr {
+        self.append_expr(
+            block,
+            Expr {
+                ty,
+                kind: ExprKind::Select(
+                    Box::new(cond.clone()),
+                    Box::new(then_value.clone()),
+                    Box::new(else_value.clone()),
+                ),
+            },
+        )
     }
 
     pub fn make_call(&mut self, block: BlockId, ty: Type, func: FuncId, params: Vec<Expr>) -> Expr {
@@ -524,6 +626,16 @@ impl FunctionDef {
         )
     }
 
+    pub fn make_neg(&mut self, block: BlockId, ty: Type, value: &Expr) -> Expr {
+        self.append_expr(
+            block,
+            Expr {
+                ty,
+                kind: ExprKind::Neg(Box::new(value.clone())),
+            },
+        )
+    }
+
     pub fn make_fadd(&mut self, block: BlockId, ty: Type, left: &Expr, right: &Expr) -> Expr {
         self.append_expr(
             block,
@@ -580,6 +692,16 @@ impl FunctionDef {
             Expr {
                 ty,
                 kind: ExprKind::FSquare(Box::new(value.clone())),
+            },
+        )
+    }
+
+    pub fn make_fneg(&mut self, block: BlockId, ty: Type, value: &Expr) -> Expr {
+        self.append_expr(
+            block,
+            Expr {
+                ty,
+                kind: ExprKind::FNeg(Box::new(value.clone())),
             },
         )
     }

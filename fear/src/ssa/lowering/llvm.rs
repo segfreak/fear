@@ -2,10 +2,10 @@ use inkwell::{
     builder::Builder,
     context::Context,
     module::Module,
-    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple},
+    targets::{InitializationConfig, Target, TargetMachine, TargetTriple},
     types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum, FloatType, FunctionType, IntType},
     values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PhiValue},
-    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
+    AddressSpace, FloatPredicate, IntPredicate,
 };
 
 use std::collections::HashMap;
@@ -13,12 +13,30 @@ use target_lexicon::Triple;
 
 use crate::{ssa::*, types::*};
 
-pub struct LlvmLowerer<'ctx> {
-    // target triple
+#[derive(Debug)]
+pub struct LlvmTarget {
     pub triple: Triple,
-    pub target_machine: TargetMachine,
+    pub machine: TargetMachine,
+}
 
+impl LlvmTarget {
+    pub fn new(triple: Triple, machine: TargetMachine) -> Self {
+        Self { triple, machine }
+    }
+
+    pub fn get_machine(&self) -> &TargetMachine {
+        &self.machine
+    }
+
+    pub fn get_triple(&self) -> &Triple {
+        &self.triple
+    }
+}
+
+pub struct LlvmLowerer<'ctx> {
+    pub target: &'ctx LlvmTarget,
     pub context: &'ctx Context,
+
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
 
@@ -29,33 +47,20 @@ pub struct LlvmLowerer<'ctx> {
 }
 
 impl<'ctx> LlvmLowerer<'ctx> {
-    pub fn new(name: &str, triple: Triple, ctx: &'ctx Context) -> Self {
+    pub fn new(name: &str, target: &'ctx LlvmTarget, ctx: &'ctx Context) -> Self {
         Target::initialize_all(&InitializationConfig::default());
 
         let module = ctx.create_module(name);
         let builder = ctx.create_builder();
 
-        let target_triple = TargetTriple::create(&triple.to_string());
+        let target_triple = TargetTriple::create(&target.get_triple().to_string());
         module.set_triple(&target_triple);
-        let llvm_target =
-            Target::from_triple(&target_triple).expect("invalid target triple for LLVM");
-        let target_machine = llvm_target
-            .create_target_machine(
-                &target_triple,
-                "generic",
-                "",
-                OptimizationLevel::None,
-                RelocMode::PIC,
-                CodeModel::Default,
-            )
-            .expect("failed to create TargetMachine");
 
-        let data_layout = target_machine.get_target_data().get_data_layout();
+        let data_layout = target.get_machine().get_target_data().get_data_layout();
         module.set_data_layout(&data_layout);
 
         Self {
-            triple,
-            target_machine,
+            target,
             context: ctx,
             module,
             builder,
@@ -75,12 +80,9 @@ impl<'ctx> LlvmLowerer<'ctx> {
             Type::Int16 => ctx.i16_type().into(),
             Type::Int32 => ctx.i32_type().into(),
             Type::Int64 => ctx.i64_type().into(),
-
             Type::Float32 => ctx.f32_type().into(),
             Type::Float64 => ctx.f64_type().into(),
-
             Type::Pointer => ctx.ptr_type(AddressSpace::default()).into(),
-
             Type::Void => panic!("void cannot be BasicType"),
         }
     }
@@ -94,12 +96,9 @@ impl<'ctx> LlvmLowerer<'ctx> {
             Type::Int16 => ctx.i16_type().into(),
             Type::Int32 => ctx.i32_type().into(),
             Type::Int64 => ctx.i64_type().into(),
-
             Type::Float32 => ctx.f32_type().into(),
             Type::Float64 => ctx.f64_type().into(),
-
             Type::Pointer => ctx.ptr_type(AddressSpace::default()).into(),
-
             Type::Void => ctx.void_type().into(),
         }
     }
@@ -198,7 +197,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
     }
 
     pub fn get_target_machine(&self) -> &TargetMachine {
-        &self.target_machine
+        self.target.get_machine()
     }
 
     pub fn lower_module(&mut self, m: &crate::ssa::Module) {
@@ -224,13 +223,13 @@ impl<'ctx> LlvmLowerer<'ctx> {
         self.blocks.clear();
         self.phis.clear();
 
-        let entry = def.entry;
+        let entry = def.get_entry();
         let bb_entry = self
             .context
             .append_basic_block(llvm_fn, &format!("b{}", entry));
         self.blocks.insert(entry, bb_entry);
 
-        for &bid in def.blocks.keys() {
+        for bid in def.get_block_ids() {
             if bid != entry {
                 let bb = self
                     .context
@@ -239,7 +238,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
             }
         }
 
-        for (i, &param_val) in def.blocks[&entry].params.iter().enumerate() {
+        for (i, &param_val) in def.get_block(entry).unwrap().params.iter().enumerate() {
             let arg = llvm_fn
                 .get_nth_param(i as u32)
                 .unwrap_or_else(|| panic!("function '{}' missing param #{}", func.name, i));
@@ -248,12 +247,12 @@ impl<'ctx> LlvmLowerer<'ctx> {
 
         self.build_phi_nodes(def);
 
-        let block_ids: Vec<BlockId> = def.reverse_post_order();
+        let block_ids: Vec<BlockId> = def.compute_rpo();
         for bid in block_ids {
             self.compile_block(m, def, bid);
         }
 
-        let block_ids: Vec<BlockId> = def.blocks.keys().copied().collect();
+        let block_ids = def.get_block_ids();
         for bid in block_ids {
             self.fill_phi_incoming(def, bid);
         }
@@ -281,8 +280,8 @@ impl<'ctx> LlvmLowerer<'ctx> {
     }
 
     fn build_phi_nodes(&mut self, def: &FunctionDef) {
-        for (&bid, block) in &def.blocks {
-            if bid == def.entry {
+        for (&bid, block) in def.get_blocks() {
+            if bid == def.get_entry() {
                 continue;
             }
 
@@ -290,9 +289,9 @@ impl<'ctx> LlvmLowerer<'ctx> {
             self.builder.position_at_end(llvm_bb);
 
             for &param in &block.params {
-                let ty = def.get_type(param);
+                let ty = def.get_type_of(param);
                 let llvm_ty = self.map_type(ty);
-                let phi = self.builder.build_phi(llvm_ty, "param").unwrap();
+                let phi = self.builder.build_phi(llvm_ty, "").unwrap();
                 self.phis.insert(param, phi);
                 self.values.insert(param, phi.as_basic_value());
             }
@@ -300,11 +299,11 @@ impl<'ctx> LlvmLowerer<'ctx> {
     }
 
     fn fill_phi_incoming(&mut self, def: &FunctionDef, bid: BlockId) {
-        if bid == def.entry {
+        if bid == def.get_entry() {
             return; /* entry params are function args */
         }
 
-        let block = &def.blocks[&bid];
+        let block = &def.get_block(bid).unwrap();
 
         for (param_idx, &param_val) in block.params.iter().enumerate() {
             let phi = match self.phis.get(&param_val) {
@@ -313,14 +312,14 @@ impl<'ctx> LlvmLowerer<'ctx> {
             };
 
             for &pred_bid in &block.preds {
-                let pred_block = &def.blocks[&pred_bid];
+                let pred_block = def.get_block(pred_bid).unwrap();
                 let pred_bb = self.blocks[&pred_bid];
 
                 let term_id = match pred_block.term {
                     Some(t) => t,
                     None => continue,
                 };
-                let term = &def.insts[&term_id];
+                let term = def.get_inst(term_id).unwrap();
 
                 let incoming_val: BasicValueEnum = match &term.kind {
                     InstKind::Jump(_) => {
@@ -366,10 +365,10 @@ impl<'ctx> LlvmLowerer<'ctx> {
         let llvm_bb = self.blocks[&bid];
         self.builder.position_at_end(llvm_bb);
 
-        let block = &def.blocks[&bid];
+        let block = def.get_block(bid).unwrap();
 
         for &inst_id in &block.insts {
-            let inst = &def.insts[&inst_id];
+            let inst = def.get_inst(inst_id).unwrap();
             self.compile_inst(m, def, inst);
         }
     }
@@ -382,13 +381,13 @@ impl<'ctx> LlvmLowerer<'ctx> {
         );
         match &inst.kind {
             InstKind::IConst(x) => {
-                let ty = def.get_type(inst.result.unwrap());
+                let ty = def.get_type_of(inst.result.unwrap());
                 let val = self.map_int_type(ty).const_int(*x as u64, true);
                 self.values.insert(inst.result.unwrap(), val.into());
             }
 
             InstKind::FConst(bits) => {
-                let ty = def.get_type(inst.result.unwrap());
+                let ty = def.get_type_of(inst.result.unwrap());
                 let val: BasicValueEnum = match ty {
                     Type::Float32 => {
                         let f = f32::from_bits(*bits as u32);
@@ -403,22 +402,16 @@ impl<'ctx> LlvmLowerer<'ctx> {
                 self.values.insert(inst.result.unwrap(), val);
             }
 
-            InstKind::Add => {
-                self.bin_int(def, inst, |b, l, r| b.build_int_add(l, r, "add").unwrap())
-            }
-            InstKind::Sub => {
-                self.bin_int(def, inst, |b, l, r| b.build_int_sub(l, r, "sub").unwrap())
-            }
-            InstKind::Mul => {
-                self.bin_int(def, inst, |b, l, r| b.build_int_mul(l, r, "mul").unwrap())
-            }
+            InstKind::Add => self.bin_int(def, inst, |b, l, r| b.build_int_add(l, r, "").unwrap()),
+            InstKind::Sub => self.bin_int(def, inst, |b, l, r| b.build_int_sub(l, r, "").unwrap()),
+            InstKind::Mul => self.bin_int(def, inst, |b, l, r| b.build_int_mul(l, r, "").unwrap()),
             InstKind::Div { signed } => {
                 let s = *signed;
                 self.bin_int(def, inst, move |b, l, r| {
                     if s {
-                        b.build_int_signed_div(l, r, "sdiv").unwrap()
+                        b.build_int_signed_div(l, r, "").unwrap()
                     } else {
-                        b.build_int_unsigned_div(l, r, "udiv").unwrap()
+                        b.build_int_unsigned_div(l, r, "").unwrap()
                     }
                 });
             }
@@ -426,55 +419,65 @@ impl<'ctx> LlvmLowerer<'ctx> {
                 let s = *signed;
                 self.bin_int(def, inst, move |b, l, r| {
                     if s {
-                        b.build_int_signed_rem(l, r, "sdiv").unwrap()
+                        b.build_int_signed_rem(l, r, "").unwrap()
                     } else {
-                        b.build_int_unsigned_rem(l, r, "udiv").unwrap()
+                        b.build_int_unsigned_rem(l, r, "").unwrap()
                     }
+                });
+            }
+            InstKind::Neg => {
+                self.un_int(def, inst, |b, v| {
+                    let zero = v.get_type().const_zero();
+                    b.build_int_sub(zero, v, "").unwrap()
                 });
             }
 
             InstKind::FAdd => {
-                self.bin_float(def, inst, |b, l, r| b.build_float_add(l, r, "add").unwrap())
+                self.bin_float(def, inst, |b, l, r| b.build_float_add(l, r, "").unwrap())
             }
             InstKind::FSub => {
-                self.bin_float(def, inst, |b, l, r| b.build_float_sub(l, r, "sub").unwrap())
+                self.bin_float(def, inst, |b, l, r| b.build_float_sub(l, r, "").unwrap())
             }
             InstKind::FMul => {
-                self.bin_float(def, inst, |b, l, r| b.build_float_mul(l, r, "mul").unwrap())
+                self.bin_float(def, inst, |b, l, r| b.build_float_mul(l, r, "").unwrap())
             }
             InstKind::FDiv => {
                 self.bin_float(def, inst, move |b, l, r| {
-                    b.build_float_div(l, r, "udiv").unwrap()
+                    b.build_float_div(l, r, "").unwrap()
                 });
             }
             InstKind::FRem => {
                 self.bin_float(def, inst, move |b, l, r| {
-                    b.build_float_rem(l, r, "sdiv").unwrap()
+                    b.build_float_rem(l, r, "").unwrap()
+                });
+            }
+            InstKind::FNeg => {
+                self.un_float(def, inst, |b, v| {
+                    let ty = v.get_type();
+                    let neg_zero = ty.const_float(-0.0);
+                    b.build_float_sub(neg_zero, v, "").unwrap()
                 });
             }
 
-            InstKind::Not => self.un_int(def, inst, |b, v| b.build_not(v, "not").unwrap()),
-            InstKind::And => self.bin_int(def, inst, |b, l, r| b.build_and(l, r, "and").unwrap()),
-            InstKind::Or => self.bin_int(def, inst, |b, l, r| b.build_or(l, r, "or").unwrap()),
-            InstKind::Xor => self.bin_int(def, inst, |b, l, r| b.build_xor(l, r, "xor").unwrap()),
-            InstKind::LShl => self.bin_int(def, inst, |b, l, r| {
-                b.build_left_shift(l, r, "shl").unwrap()
-            }),
+            InstKind::Not => self.un_int(def, inst, |b, v| b.build_not(v, "").unwrap()),
+            InstKind::And => self.bin_int(def, inst, |b, l, r| b.build_and(l, r, "").unwrap()),
+            InstKind::Or => self.bin_int(def, inst, |b, l, r| b.build_or(l, r, "").unwrap()),
+            InstKind::Xor => self.bin_int(def, inst, |b, l, r| b.build_xor(l, r, "").unwrap()),
+            InstKind::LShl => {
+                self.bin_int(def, inst, |b, l, r| b.build_left_shift(l, r, "").unwrap())
+            }
             InstKind::LShr => self.bin_int(def, inst, |b, l, r| {
-                b.build_right_shift(l, r, false, "lshr").unwrap()
+                b.build_right_shift(l, r, false, "").unwrap()
             }),
             InstKind::AShr => self.bin_int(def, inst, |b, l, r| {
-                b.build_right_shift(l, r, true, "ashr").unwrap()
+                b.build_right_shift(l, r, true, "").unwrap()
             }),
 
             InstKind::Cmp(kind) => {
                 let lhs = self.get_int_or_const(def, inst.operands[0]);
                 let rhs = self.get_int_or_const(def, inst.operands[1]);
                 let pred = self.map_int_pred(*kind);
-                let val = self
-                    .builder
-                    .build_int_compare(pred, lhs, rhs, "cmp")
-                    .unwrap();
+                let val = self.builder.build_int_compare(pred, lhs, rhs, "").unwrap();
                 self.values.insert(inst.result.unwrap(), val.into());
             }
 
@@ -484,14 +487,14 @@ impl<'ctx> LlvmLowerer<'ctx> {
                 let pred = self.map_float_pred(*kind);
                 let val = self
                     .builder
-                    .build_float_compare(pred, lhs, rhs, "fcmp")
+                    .build_float_compare(pred, lhs, rhs, "")
                     .unwrap();
                 self.values.insert(inst.result.unwrap(), val.into());
             }
 
             InstKind::Alloca(ty) => {
                 let llvm_ty = self.map_type(*ty);
-                let ptr = self.builder.build_alloca(llvm_ty, "alloca").unwrap();
+                let ptr = self.builder.build_alloca(llvm_ty, "").unwrap();
                 self.values.insert(inst.result.unwrap(), ptr.into());
             }
 
@@ -502,7 +505,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
                     .build_array_alloca(
                         llvm_ty,
                         self.context.i64_type().const_int(*size as u64, true),
-                        "alloca",
+                        "",
                     )
                     .unwrap();
                 self.values.insert(inst.result.unwrap(), ptr.into());
@@ -510,9 +513,9 @@ impl<'ctx> LlvmLowerer<'ctx> {
 
             InstKind::Load { volatile } => {
                 let ptr_val = self.get(inst.operands[0]).into_pointer_value();
-                let result_ty = def.get_type(inst.result.unwrap());
+                let result_ty = def.get_type_of(inst.result.unwrap());
                 let llvm_ty = self.map_type(result_ty);
-                let load = self.builder.build_load(llvm_ty, ptr_val, "load").unwrap();
+                let load = self.builder.build_load(llvm_ty, ptr_val, "").unwrap();
                 load.as_instruction_value()
                     .unwrap()
                     .set_volatile(*volatile)
@@ -531,11 +534,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
                 let base = self.get(inst.operands[0]).into_pointer_value();
                 let offset = self.get_int_or_const(def, inst.operands[1]);
                 let i8_ty = self.context.i8_type();
-                let ptr = unsafe {
-                    self.builder
-                        .build_gep(i8_ty, base, &[offset], "ptroffset")
-                        .unwrap()
-                };
+                let ptr = unsafe { self.builder.build_gep(i8_ty, base, &[offset], "").unwrap() };
                 self.values.insert(inst.result.unwrap(), ptr.into());
             }
 
@@ -543,11 +542,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
                 let base = self.get(inst.operands[0]).into_pointer_value();
                 let offset = self.get_int_or_const(def, inst.operands[1]);
                 let ty = self.map_type(*ty);
-                let ptr = unsafe {
-                    self.builder
-                        .build_gep(ty, base, &[offset], "elementptr")
-                        .unwrap()
-                };
+                let ptr = unsafe { self.builder.build_gep(ty, base, &[offset], "").unwrap() };
                 self.values.insert(inst.result.unwrap(), ptr.into());
             }
 
@@ -558,7 +553,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
 
                 let meta_args: Vec<_> = args.iter().map(|v| (*v).into()).collect();
 
-                let call = self.builder.build_call(callee, &meta_args, "call").unwrap();
+                let call = self.builder.build_call(callee, &meta_args, "").unwrap();
 
                 if let Some(res) = inst.result {
                     let ret_val = call
@@ -571,7 +566,7 @@ impl<'ctx> LlvmLowerer<'ctx> {
 
             InstKind::Cast(kind) => {
                 let src_val = self.get(inst.operands[0]);
-                let dst_ty = def.get_type(inst.result.unwrap());
+                let dst_ty = def.get_type_of(inst.result.unwrap());
                 let result = self.lower_cast(*kind, src_val, dst_ty);
                 self.values.insert(inst.result.unwrap(), result);
             }
@@ -602,6 +597,30 @@ impl<'ctx> LlvmLowerer<'ctx> {
                     let v = self.get(inst.operands[0]);
                     self.builder.build_return(Some(&v)).unwrap();
                 }
+            }
+
+            InstKind::Undef => {
+                let dst_ty = def.get_type_of(inst.result.unwrap());
+                let ty: BasicTypeEnum<'_> = self.map_type(dst_ty);
+                use inkwell::types::BasicTypeEnum::*;
+                let undef = match ty {
+                    ArrayType(t) => t.get_undef().into(),
+                    FloatType(t) => t.get_undef().into(),
+                    IntType(t) => t.get_undef().into(),
+                    PointerType(t) => t.get_undef().into(),
+                    StructType(t) => t.get_undef().into(),
+                    VectorType(t) => t.get_undef().into(),
+                    ScalableVectorType(t) => t.get_undef().into(),
+                };
+                self.values.insert(inst.result.unwrap(), undef);
+            }
+
+            InstKind::Select => {
+                let cond = self.get_int_or_const(def, inst.operands[0]);
+                let tvalue = self.get(inst.operands[1]);
+                let evalue = self.get(inst.operands[2]);
+                let result = self.builder.build_select(cond, tvalue, evalue, "").unwrap();
+                self.values.insert(inst.result.unwrap(), result);
             }
         }
     }
@@ -742,6 +761,18 @@ impl<'ctx> LlvmLowerer<'ctx> {
         self.values.insert(inst.result.unwrap(), res.into());
     }
 
+    fn un_float<F>(&mut self, def: &FunctionDef, inst: &Inst, f: F)
+    where
+        F: Fn(
+            &Builder<'ctx>,
+            inkwell::values::FloatValue<'ctx>,
+        ) -> inkwell::values::FloatValue<'ctx>,
+    {
+        let a = self.get_float_or_const(def, inst.operands[0]);
+        let res = f(&self.builder, a);
+        self.values.insert(inst.result.unwrap(), res.into());
+    }
+
     #[allow(unused)]
     fn unary<F>(&mut self, def: &FunctionDef, inst: &Inst, f: F)
     where
@@ -769,8 +800,8 @@ impl<'ctx> LlvmLowerer<'ctx> {
     }
 
     fn get_or_const(&self, def: &FunctionDef, v: ValueId) -> BasicValueEnum<'ctx> {
-        if let Some(c) = def.get_iconst(v) {
-            let ty = self.map_int_type(def.get_type(v));
+        if let Some(c) = def.get_int_const(v) {
+            let ty = self.map_int_type(def.get_type_of(v));
             ty.const_int(c as u64, true).into()
         } else {
             self.get(v)
@@ -778,8 +809,8 @@ impl<'ctx> LlvmLowerer<'ctx> {
     }
 
     fn get_int_or_const(&self, def: &FunctionDef, v: ValueId) -> IntValue<'ctx> {
-        if let Some(c) = def.get_iconst(v) {
-            let ty = self.map_int_type(def.get_type(v));
+        if let Some(c) = def.get_int_const(v) {
+            let ty = self.map_int_type(def.get_type_of(v));
             ty.const_int(c as u64, true)
         } else {
             self.get(v).into_int_value()
@@ -787,8 +818,8 @@ impl<'ctx> LlvmLowerer<'ctx> {
     }
 
     fn get_float_or_const(&self, def: &FunctionDef, v: ValueId) -> FloatValue<'ctx> {
-        if let Some(c) = def.get_fconst(v) {
-            let ty = self.map_float_type(def.get_type(v));
+        if let Some(c) = def.get_float_const(v) {
+            let ty = self.map_float_type(def.get_type_of(v));
             ty.const_float(c)
         } else {
             self.get(v).into_float_value()

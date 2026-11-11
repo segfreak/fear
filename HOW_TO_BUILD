@@ -1,22 +1,13 @@
 NOTES
-  - You need to install wild-linker using
-    $ sudo binstall wild-linker
+  - You need to install depenedencies
+    $ cargo install cbindgen
 
 EXAMPLES
-  - Building with LLVM 22.1
-    $ sh build.sh --features fear/llvm,inkwell/llvm22-1
-    $ sh bindings.sh                                              # generate bindings (cbindgen)
-    $ sudo sh install.sh /usr/                                    # install library system-wide
-    $ sudo sh install.sh                                          # install library with /usr/local prefix
+  - Building with LLVM 22.1 (with installation)
+    $ ./build.sh --with-llvm=llvm22-1 --release --install --prefix "/usr/local/"
+  
+  - Building with cranelift only (with installation)
+    $ ./build.sh ---release --install --prefix "/usr/local/"
 
-FEATURES
-
-llvm
-  Enables LLVM backend support for code generation.
-  Required dependencies:
-    - inkwell
-    - llvm (system or bundled version compatible with inkwell)
-
-cranelift
-  Enables Cranelift backend support for code generation.
-  No additional mandatory system dependencies (handled via Cranelift crates).
+  - Building with LLVM 22.1 only (with installation)
+    $ ./build.sh --with-llvm=llvm22-1 --enable-cranelift=OFF ---release --install --prefix "/usr/local/"

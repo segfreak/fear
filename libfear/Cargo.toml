@@ -1,10 +1,11 @@
 [package]
-name = "fearc"
+name = "libfear"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
+name = "fear"
 
 [features]
 default = ["cranelift", "binary-ir"]

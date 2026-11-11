@@ -49,6 +49,8 @@ impl Pipeline {
     pub fn with_passes(max_passes: i32, passes: &[PassKind]) -> Self {
         use PassKind::*;
 
+        log::debug!("creating pipeline with passes: {:?}", passes);
+
         let mut pipeline = Self::new(max_passes);
 
         pipeline.get_passes_mut().insert(Expressify);
@@ -59,12 +61,10 @@ impl Pipeline {
     pub fn with_level(max_passes: i32, level: OptLevel) -> Self {
         use PassKind::*;
 
-        let mut pipeline = Self::new(max_passes);
+        let mut passes = Vec::new();
 
-        pipeline.get_passes_mut().insert(Expressify);
-
-        if level <= OptLevel::Default {
-            pipeline.passes.extend(vec![
+        if level >= OptLevel::Default {
+            passes.extend(vec![
                 CommonSubexpressionElimination,
                 DeadCodeElimination,
                 Expressify,
@@ -76,7 +76,7 @@ impl Pipeline {
             ]);
         }
 
-        pipeline
+        Self::with_passes(max_passes, &passes)
     }
 
     pub fn get_max_passes(&self) -> i32 {
@@ -111,7 +111,7 @@ impl PassManager {
         let mut counter: i32 = 0;
         loop {
             let before_cost = f.get_cost();
-            let before_hash = f.dirty_hash();
+            let before_hash = f.get_hash();
 
             let mut run = Vec::new();
 
@@ -144,7 +144,6 @@ impl PassManager {
             }
 
             try_run_pass!(expressify::expressify, PassKind::Expressify);
-
             try_run_pass!(normalize::normalize, PassKind::Normalize);
             try_run_pass!(simplify::simplify, PassKind::Simplify);
             try_run_pass!(fold::fold, PassKind::ConstantFolding);
@@ -168,7 +167,7 @@ impl PassManager {
                     after_cost - before_cost
                 );
             }
-            let changed = f.dirty_hash() != before_hash;
+            let changed = f.get_hash() != before_hash;
             if !changed || counter >= pipeline.max_passes {
                 break;
             }
@@ -179,10 +178,10 @@ impl PassManager {
         let after_cost = f.get_cost();
 
         log::debug!(
-            "summary: cost {} -> {} (diff: -{}, improvement: {:.2}%)",
+            "summary: cost {} -> {} (diff: {}, improvement: {:.2}%)",
             before_cost,
             after_cost,
-            before_cost.saturating_sub(after_cost),
+            -(before_cost.saturating_sub(after_cost) as i32),
             if before_cost > 0 {
                 (before_cost as f64 - after_cost as f64) / before_cost as f64 * 100.0
             } else {
