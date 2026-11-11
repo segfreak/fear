@@ -14,7 +14,7 @@ int main()
     auto bar = Function::declare(&m, "bar", {Type::Pointer}, Type::Int32);
     auto baz = Function::declare(&m, "baz", {}, Type::Int32);
     FunctionDef f{};
-    auto        slot = f.alloca(Type::Int32);
+    auto        slot = f.alloc(Type::Int32);
     f.call(bar.getId(), Type::Void, std::vector<ValueId>{slot});
     auto undef = f.load(Type::Int32, slot);
     f.ret(undef);
@@ -30,6 +30,6 @@ int main()
     fprintf(stderr, "=> baz.o\n");
     FILE* file = fopen("baz.o", "w");
     m.emitObject(fear::OptLevel::Full, file, true, std::nullopt,
-                 std::nullopt, Backend::Llvm);
+                 std::nullopt);
     fclose(file);
 }
