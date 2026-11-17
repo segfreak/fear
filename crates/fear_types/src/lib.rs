@@ -8,7 +8,20 @@ pub type BlockId = u32;
 pub type FuncId = u32;
 
 #[repr(C)]
-#[derive(Debug, EnumDisplay, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    EnumDisplay,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Type {
     #[default]
     #[display("void")]
@@ -78,9 +91,11 @@ impl Type {
             Self::Int64 => 8,
             Self::Float32 => 4,
             Self::Float64 => 8,
-            Self::Pointer => {
-                triple.architecture.pointer_width().unwrap_or(target_lexicon::PointerWidth::U64).bytes() as usize
-            },
+            Self::Pointer => triple
+                .architecture
+                .pointer_width()
+                .unwrap_or(target_lexicon::PointerWidth::U64)
+                .bytes() as usize,
         }
     }
 
@@ -91,7 +106,18 @@ impl Type {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum OptLevel {
     None,
     Default,
@@ -111,7 +137,18 @@ impl FunctionSignature {
 }
 
 #[repr(C)]
-#[derive(Debug, EnumDisplay, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    EnumDisplay,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Linkage {
     /// Function Definition:  Visible outside module, single strong definition
     /// Function Declaration: External Symbol declaration
@@ -142,7 +179,9 @@ impl TryFrom<&str> for Linkage {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, EnumDisplay, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, EnumDisplay, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub enum CallingConvention {
     /// C ABI
     #[default]
@@ -171,7 +210,9 @@ impl TryFrom<&str> for CallingConvention {
     }
 }
 
-#[derive(Debug, EnumDisplay, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, EnumDisplay, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum IntCmp {
     #[display("eq")]
     Eq,
@@ -215,7 +256,9 @@ impl TryFrom<&str> for IntCmp {
     }
 }
 
-#[derive(Debug, EnumDisplay, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, EnumDisplay, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum FloatCmp {
     #[display("ord")]
     Ord,
@@ -271,7 +314,9 @@ impl TryFrom<&str> for FloatCmp {
     }
 }
 
-#[derive(Debug, EnumDisplay, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, EnumDisplay, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum CastKind {
     #[display("zext")]
     Zext,

@@ -220,7 +220,7 @@ pub fn simplify_expr(expr: Expr, changed: &mut bool) -> Expr {
                 (
                     ExprKind::Mul(
                         deref!(x),
-                        deref!( Expr {
+                        deref!(Expr {
                             kind: ExprKind::Const(y),
                             ..
                         }),

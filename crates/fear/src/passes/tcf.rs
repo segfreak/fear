@@ -1,7 +1,7 @@
 use target_lexicon::Triple;
 
-use crate::*;
 use super::constfold::eval_int_cmp;
+use crate::*;
 
 /// Trivial compares folding
 pub fn tcf(m: &mut Module, f: FuncId, _triple: &Triple) -> bool {

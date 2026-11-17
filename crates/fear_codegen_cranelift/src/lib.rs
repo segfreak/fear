@@ -3,9 +3,9 @@ use std::sync::Arc;
 use cranelift::codegen::ir::{BlockArg, Function, LibCall, UserFuncName};
 use cranelift::codegen::isa::{CallConv, TargetIsa};
 use cranelift_codegen::ir::InstBuilder;
-use cranelift_module::{Linkage as CLinkage};
-use cranelift_object::{ObjectBuilder, ObjectModule};
 use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::Linkage as CLinkage;
+use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 
 use fear::prelude::*;
@@ -181,15 +181,22 @@ impl<M: cranelift_module::Module> CraneliftCodegen<M> {
         }
     }
 
-    fn make_signature(&self, callconv: CallingConvention, sig: &FunctionSignature) -> cranelift::prelude::Signature {
+    fn make_signature(
+        &self,
+        callconv: CallingConvention,
+        sig: &FunctionSignature,
+    ) -> cranelift::prelude::Signature {
         let call_conv = self.map_callconv(&self.module.target_config(), callconv);
         let mut s = cranelift::prelude::Signature::new(call_conv);
         for &p in &sig.params {
-            s.params.push(cranelift::prelude::AbiParam::new(map_type(&self.triple, p)));
+            s.params
+                .push(cranelift::prelude::AbiParam::new(map_type(&self.triple, p)));
         }
         if sig.returns != Type::Void {
-            s.returns
-                .push(cranelift::prelude::AbiParam::new(map_type(&self.triple, sig.returns)));
+            s.returns.push(cranelift::prelude::AbiParam::new(map_type(
+                &self.triple,
+                sig.returns,
+            )));
         }
         s
     }
@@ -309,8 +316,6 @@ impl<M: cranelift_module::Module> CraneliftCodegen<M> {
         ctx.func = cl_func;
         self.module.define_function(cl_fid, &mut ctx).unwrap();
     }
-
-
 }
 
 fn get_or_const(
@@ -466,7 +471,9 @@ fn compile_inst(
                 size,
                 0,
             ));
-            let ptr = fx.ins().stack_addr(cranelift::prelude::types::I64, slot, 0);
+            let ptr = fx
+                .ins()
+                .stack_addr(map_type(triple, Type::Pointer), slot, 0);
             values.insert(inst.result.unwrap(), ptr);
         }
 
@@ -474,9 +481,15 @@ fn compile_inst(
             let ty = map_type(triple, *ty);
             let elem_bytes = ty.bytes();
             let size = elem_bytes * (*count as u32);
-            let slot_data = cranelift::prelude::StackSlotData::new(cranelift::prelude::StackSlotKind::ExplicitSlot, size, 0);
+            let slot_data = cranelift::prelude::StackSlotData::new(
+                cranelift::prelude::StackSlotKind::ExplicitSlot,
+                size,
+                0,
+            );
             let slot = fx.create_sized_stack_slot(slot_data);
-            let ptr = fx.ins().stack_addr(cranelift::prelude::types::I64, slot, 0);
+            let ptr = fx
+                .ins()
+                .stack_addr(map_type(triple, Type::Pointer), slot, 0);
             values.insert(inst.result.unwrap(), ptr);
         }
 
@@ -521,7 +534,9 @@ fn compile_inst(
                 raw_offset
             };
 
-            let type_size = fx.ins().iconst(cranelift::prelude::types::I64, ty.get_size(triple) as i64);
+            let type_size = fx
+                .ins()
+                .iconst(cranelift::prelude::types::I64, ty.get_size(triple) as i64);
             let final_offset = fx.ins().imul(offset_expanded, type_size);
 
             let final_offset_adjusted = if base_ty != cranelift::prelude::types::I64 {
@@ -655,7 +670,10 @@ fn lower_cast(
             (Type::Int32, Type::Float32)
             | (Type::Int64, Type::Float64)
             | (Type::Float32, Type::Int32)
-            | (Type::Float64, Type::Int64) => fx.ins().bitcast(cl_dst, cranelift::prelude::MemFlags::new(), src),
+            | (Type::Float64, Type::Int64) => {
+                fx.ins()
+                    .bitcast(cl_dst, cranelift::prelude::MemFlags::new(), src)
+            }
             _ => src,
         },
         CastKind::SIToFP => fx.ins().fcvt_from_sint(cl_dst, src),
@@ -696,7 +714,10 @@ fn un_int<F>(
 
     f: F,
 ) where
-    F: Fn(&mut cranelift::prelude::FunctionBuilder, cranelift::prelude::Value) -> cranelift::prelude::Value,
+    F: Fn(
+        &mut cranelift::prelude::FunctionBuilder,
+        cranelift::prelude::Value,
+    ) -> cranelift::prelude::Value,
 {
     let a = get_or_const(def, inst.operands[0], values, fx, triple);
     let res = f(fx, a);
@@ -729,7 +750,10 @@ fn un_float<F>(
     fx: &mut cranelift::prelude::FunctionBuilder,
     f: F,
 ) where
-    F: Fn(&mut cranelift::prelude::FunctionBuilder, cranelift::prelude::Value) -> cranelift::prelude::Value,
+    F: Fn(
+        &mut cranelift::prelude::FunctionBuilder,
+        cranelift::prelude::Value,
+    ) -> cranelift::prelude::Value,
 {
     let a = get_float_or_const(def, inst.operands[0], values, fx);
     let res = f(fx, a);

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
-use crate::*;
 use crate::Type;
+use crate::*;
 
 fn canonical_ops(kind: &InstKind, mut ops: Vec<(ValueId, Type)>) -> Vec<(ValueId, Type)> {
     match kind {

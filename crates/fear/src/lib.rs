@@ -1,8 +1,8 @@
-pub mod builder;
-pub mod verify;
-pub mod dump;
 pub mod analysis;
+pub mod builder;
+pub mod dump;
 pub mod passes;
+pub mod verify;
 
 pub mod prelude {
     pub use super::*;
@@ -11,7 +11,8 @@ pub mod prelude {
 
 use prelude::*;
 use std::{
-    collections::{HashMap, HashSet, hash_map}, hash::{DefaultHasher, Hash, Hasher},
+    collections::{HashMap, HashSet, hash_map},
+    hash::{DefaultHasher, Hash, Hasher},
 };
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

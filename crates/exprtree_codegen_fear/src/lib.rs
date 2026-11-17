@@ -117,12 +117,7 @@ impl FearCodegen {
         }
     }
 
-    fn raise_expr(
-        &mut self,
-        e: &Expr,
-        dst: &mut fear::FunctionDef,
-        block: BlockId,
-    ) -> ValueId {
+    fn raise_expr(&mut self, e: &Expr, dst: &mut fear::FunctionDef, block: BlockId) -> ValueId {
         log::trace!("lowering expression: {:?}", e);
 
         let ty = e.ty;

@@ -123,9 +123,7 @@ impl ExprTreeCodegen {
                 &self.v(ops[0], dst),
                 &self.v(ops[1], dst),
             ),
-            ssa::InstKind::Neg => {
-                dst.make_neg(block, ty, &self.v(ops[0], dst))
-            }
+            ssa::InstKind::Neg => dst.make_neg(block, ty, &self.v(ops[0], dst)),
 
             ssa::InstKind::FAdd => {
                 dst.make_fadd(block, ty, &self.v(ops[0], dst), &self.v(ops[1], dst))
@@ -142,9 +140,7 @@ impl ExprTreeCodegen {
             ssa::InstKind::FRem => {
                 dst.make_frem(block, ty, &self.v(ops[0], dst), &self.v(ops[1], dst))
             }
-            ssa::InstKind::FNeg => {
-                dst.make_fneg(block, ty, &self.v(ops[0], dst))
-            }
+            ssa::InstKind::FNeg => dst.make_fneg(block, ty, &self.v(ops[0], dst)),
 
             ssa::InstKind::LShl => {
                 dst.make_shl(block, ty, &self.v(ops[0], dst), &self.v(ops[1], dst))
@@ -200,9 +196,13 @@ impl ExprTreeCodegen {
 
             ssa::InstKind::Undef => dst.make_undef(block, ty),
 
-            ssa::InstKind::Select => {
-                dst.make_select(block, ty,  &self.v(ops[0], dst), &self.v(ops[1], dst), &self.v(ops[2], dst))
-            }
+            ssa::InstKind::Select => dst.make_select(
+                block,
+                ty,
+                &self.v(ops[0], dst),
+                &self.v(ops[1], dst),
+                &self.v(ops[2], dst),
+            ),
 
             ssa::InstKind::Ret | ssa::InstKind::Jump(_) | ssa::InstKind::JumpIf { .. } => {
                 todo!("{:?} must be handled by raise_terminator", inst.kind)

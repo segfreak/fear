@@ -232,12 +232,14 @@ mod tests {
         let m2 = simple_mod("b", "foo", Linkage::External, true);
         let result = link("out", [m1, m2]).expect("link failed");
         let fid = result.module.lookup_function("foo").unwrap();
-        assert!(result
-            .module
-            .get_function(fid)
-            .unwrap()
-            .get_definition()
-            .is_some());
+        assert!(
+            result
+                .module
+                .get_function(fid)
+                .unwrap()
+                .get_definition()
+                .is_some()
+        );
     }
 
     #[test]

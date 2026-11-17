@@ -1,11 +1,12 @@
 #![feature(deref_patterns)]
 
 pub mod builder;
-pub mod passes;
 pub mod dump;
+pub mod passes;
 
 use std::{
-    collections::{HashMap, HashSet}, hash::{DefaultHasher, Hash, Hasher},
+    collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
 };
 
 pub mod prelude {

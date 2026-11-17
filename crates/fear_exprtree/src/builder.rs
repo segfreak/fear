@@ -1,8 +1,6 @@
-
 use crate::*;
 
 impl FunctionDef {
-
     pub fn make_undef(&mut self, block: BlockId, ty: Type) -> Expr {
         self.append_expr(
             block,

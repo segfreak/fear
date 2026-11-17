@@ -5,7 +5,6 @@ use target_lexicon::Triple;
 
 use super::{FuncId, Module};
 
-pub mod simplify;
 pub mod cfg_simplify;
 pub mod constfold;
 pub mod copyprop;
@@ -13,10 +12,11 @@ pub mod cse;
 pub mod dce;
 pub mod dse;
 pub mod gvn;
-pub mod strength_reduction;
-pub mod tre;
 pub mod mem2reg;
+pub mod simplify;
+pub mod strength_reduction;
 pub mod tcf;
+pub mod tre;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PassKind {
@@ -56,7 +56,11 @@ impl PassManager {
 
         macro_rules! fnhash {
             () => {
-                m.get_function_mut(f).unwrap().get_definition().unwrap().get_hash()
+                m.get_function_mut(f)
+                    .unwrap()
+                    .get_definition()
+                    .unwrap()
+                    .get_hash()
             };
         }
 
@@ -71,7 +75,11 @@ impl PassManager {
                     if $pass(m, f, triple) {
                         log::trace!("performed pass: {:?}", $kind);
                         run.push($kind);
-                        m.get_function_mut(f).unwrap().get_definition_mut().unwrap().reconstruct();
+                        m.get_function_mut(f)
+                            .unwrap()
+                            .get_definition_mut()
+                            .unwrap()
+                            .reconstruct();
                     }
                 };
             }
@@ -79,7 +87,10 @@ impl PassManager {
             if cfg.level >= OptLevel::Default {
                 run_pass!(constfold::constfold, PassKind::ConstantFolding);
                 run_pass!(simplify::simplify, PassKind::Simplify);
-                run_pass!(strength_reduction::strength_reduction, PassKind::StrengthReduction);
+                run_pass!(
+                    strength_reduction::strength_reduction,
+                    PassKind::StrengthReduction
+                );
                 run_pass!(copyprop::copyprop, PassKind::CopyPropagation);
                 run_pass!(gvn::gvn, PassKind::GlobalValueNumbering);
                 run_pass!(cse::cse, PassKind::CommonSubexpressionElimination);
@@ -91,10 +102,8 @@ impl PassManager {
                 run_pass!(mem2reg::mem2reg, PassKind::Mem2Reg);
             }
 
-
             let changed = fnhash!() != before_hash;
-            if changed
-            {
+            if changed {
                 log::debug!("pipeline: performed {:?} passes", run);
             }
 
@@ -110,7 +119,11 @@ impl PassManager {
         result
     }
 
-    pub fn run_module(cfg: OptConfig, triple: &Triple, m: &mut Module) -> HashMap<FuncId, PassResult> {
+    pub fn run_module(
+        cfg: OptConfig,
+        triple: &Triple,
+        m: &mut Module,
+    ) -> HashMap<FuncId, PassResult> {
         let mut tmp = HashMap::new();
 
         let func_ids: Vec<FuncId> = m
@@ -136,9 +149,8 @@ impl PassManager {
                 pass_result.passes
             );
 
-            if pass_result.changed
-            {
-                log::trace!("after passes:\n{}", m.dump_function(func_id));        
+            if pass_result.changed {
+                log::trace!("after passes:\n{}", m.dump_function(func_id));
             }
 
             tmp.insert(func_id, pass_result);
@@ -149,14 +161,16 @@ impl PassManager {
 }
 
 impl Module {
-    pub fn optimize_with_options(&mut self, cfg: OptConfig, triple: &Triple) -> HashMap<FuncId, PassResult> {
+    pub fn optimize_with_options(
+        &mut self,
+        cfg: OptConfig,
+        triple: &Triple,
+    ) -> HashMap<FuncId, PassResult> {
         PassManager::run_module(cfg, triple, self)
     }
 
     pub fn optimize(&mut self, level: OptLevel, triple: &Triple) -> HashMap<FuncId, PassResult> {
-        let cfg = OptConfig {
-            level,
-        };
+        let cfg = OptConfig { level };
         self.optimize_with_options(cfg, triple)
     }
 }

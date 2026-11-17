@@ -1,17 +1,17 @@
 use inkwell::{
+    AddressSpace, FloatPredicate, IntPredicate,
     builder::Builder,
     context::Context,
     module::Module,
     targets::{InitializationConfig, Target, TargetMachine, TargetTriple},
     types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum, FloatType, FunctionType, IntType},
     values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PhiValue},
-    AddressSpace, FloatPredicate, IntPredicate,
 };
 
 use std::collections::HashMap;
 use target_lexicon::Triple;
 
-use fear::{prelude::*};
+use fear::prelude::*;
 
 #[derive(Debug)]
 pub struct LlvmTarget {
@@ -246,7 +246,13 @@ impl<'ctx> LlvmLowerer<'ctx> {
             }
         }
 
-        for (i, &param_val) in def.get_block(entry).unwrap().get_params().iter().enumerate() {
+        for (i, &param_val) in def
+            .get_block(entry)
+            .unwrap()
+            .get_params()
+            .iter()
+            .enumerate()
+        {
             let arg = llvm_fn
                 .get_nth_param(i as u32)
                 .unwrap_or_else(|| panic!("function '{}' missing param #{}", func.name, i));

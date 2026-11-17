@@ -89,11 +89,7 @@ impl Module {
             }
         }
 
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(errs)
-        }
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 
     fn verify_function(&self, _id: FuncId, fun: &Function) -> Result<(), VerifyError> {
