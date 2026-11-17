@@ -1,6 +1,20 @@
 [workspace]
 resolver = "2"
-members = ["fear", "libfear"]
+members = ["crates/exprtree_codegen_fear","crates/fear", "crates/fear_codegen_cranelift", "crates/fear_codegen_exprtree", "crates/fear_codegen_llvm", "crates/fear_exprtree", "crates/fear_link", "crates/fear_types"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
 
 [workspace.dependencies]
-fear = { path = "fear" }
+fear_types = { path = "crates/fear_types" }
+fear = { path = "crates/fear" }
+fear_exprtree = { path = "crates/fear_exprtree" }
+
+clap = { version = "4.6.8", features = ["derive"] }
+enum-display = "0.2.1"
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+target-lexicon = { version = "0.13.5" }

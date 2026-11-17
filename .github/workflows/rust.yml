@@ -16,7 +16,5 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Installing depenedencies
-      run: cargo install cbindgen
     - name: Run tests
-      run: make test RELEASE=1 LLVM=OFF
+      run: cargo test

@@ -1,0 +1,11 @@
+[package]
+name = "fear_types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+enum-display =  { workspace = true }
+serde = { workspace = true }
+target-lexicon = { workspace = true }

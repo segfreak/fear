@@ -1,0 +1,11 @@
+[package]
+name = "fear_exprtree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fear = { workspace = true }
+fear_types = { workspace = true }
+log = { workspace = true }
+target-lexicon = { workspace = true }

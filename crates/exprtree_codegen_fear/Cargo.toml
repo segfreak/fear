@@ -1,0 +1,12 @@
+[package]
+name = "exprtree_codegen_fear"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fear = { workspace = true }
+fear_exprtree = { workspace = true }
+fear_types = { workspace = true }
+
+log = { workspace = true }
