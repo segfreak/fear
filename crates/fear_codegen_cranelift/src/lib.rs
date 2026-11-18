@@ -79,10 +79,7 @@ fn map_float_cond(kind: FloatCmp) -> cranelift::prelude::FloatCC {
         FloatCmp::OGe => cranelift::prelude::FloatCC::GreaterThanOrEqual,
 
         FloatCmp::UEq => cranelift::prelude::FloatCC::UnorderedOrEqual,
-        // UNe: any unordered comparison is "not equal", use UnorderedOrLessThan | UnorderedOrGreaterThan
-        // Cranelift does not have a single UnorderedOrNotEqual; use Ordered negation via Unordered.
-        // The closest correct mapping: if either is NaN, they're "not equal".
-        FloatCmp::UNe => cranelift::prelude::FloatCC::UnorderedOrLessThan,
+        FloatCmp::UNe => panic!("cranelift does not have floatcmp-une single operation"),
         FloatCmp::ULt => cranelift::prelude::FloatCC::UnorderedOrLessThan,
         FloatCmp::ULe => cranelift::prelude::FloatCC::UnorderedOrLessThanOrEqual,
         FloatCmp::UGt => cranelift::prelude::FloatCC::UnorderedOrGreaterThan,
@@ -309,8 +306,7 @@ impl<M: cranelift_module::Module> CraneliftCodegen<M> {
             }
         }
 
-        // fx.finalize();
-        // self.finan
+        fx.finalize();
 
         let mut ctx = cranelift::codegen::Context::new();
         ctx.func = cl_func;
@@ -458,8 +454,27 @@ fn compile_inst(
         InstKind::FCmp(kind) => {
             let lhs = get_float_or_const(def, inst.operands[0], values, fx);
             let rhs = get_float_or_const(def, inst.operands[1], values, fx);
-            let cond = map_float_cond(*kind);
-            let val = fx.ins().fcmp(cond, lhs, rhs);
+
+            // cranelift doesnt support fcmp.une instruction
+            let val = if *kind == FloatCmp::UNe {
+                let unordered = fx.ins().fcmp(
+                    cranelift::prelude::FloatCC::Unordered,
+                    lhs,
+                    rhs,
+                );
+
+                let not_equal = fx.ins().fcmp(
+                    cranelift::prelude::FloatCC::NotEqual,
+                    lhs,
+                    rhs,
+                );
+
+                fx.ins().bor(unordered, not_equal)
+            } else {
+                let cond = map_float_cond(*kind);
+                fx.ins().fcmp(cond, lhs, rhs)
+            };
+
             values.insert(inst.result.unwrap(), val);
         }
 
@@ -494,24 +509,43 @@ fn compile_inst(
         }
 
         InstKind::Load { volatile } => {
+            if *volatile {
+                log::warn!(
+                    "Cranelift backend does not support volatile loads; \
+                    volatile semantics will not be preserved"
+                );
+            }
+
             let ptr = get(inst.operands[0], values);
             let result_ty = map_type(triple, def.get_type_of(inst.result.unwrap()));
-            let mut flags = cranelift::prelude::MemFlags::new();
-            if !volatile {
-                flags.set_notrap();
-            }
-            let val = fx.ins().load(result_ty, flags, ptr, 0);
+
+            let val = fx.ins().load(
+                result_ty,
+                cranelift::prelude::MemFlags::new(),
+                ptr,
+                0,
+            );
+
             values.insert(inst.result.unwrap(), val);
         }
 
         InstKind::Store { volatile } => {
+            if *volatile {
+                log::warn!(
+                    "Cranelift backend does not support volatile stores; \
+                    volatile semantics will not be preserved"
+                );
+            }
+
             let ptr = get(inst.operands[0], values);
             let value = get(inst.operands[1], values);
-            let mut flags = cranelift::prelude::MemFlags::new();
-            if !volatile {
-                flags.set_notrap();
-            }
-            fx.ins().store(flags, value, ptr, 0);
+
+            fx.ins().store(
+                cranelift::prelude::MemFlags::new(),
+                value,
+                ptr,
+                0,
+            );
         }
 
         InstKind::PtrOffset => {
@@ -528,8 +562,9 @@ fn compile_inst(
             let raw_offset = get_or_const(def, inst.operands[1], values, fx, triple);
             let offset_ty = fx.func.dfg.value_type(raw_offset);
 
-            let offset_expanded = if offset_ty.bits() < 64 {
-                fx.ins().sextend(cranelift::prelude::types::I64, raw_offset)
+            let ptr_ty = map_type(triple, Type::Pointer);
+            let offset_expanded = if offset_ty.bits() < ptr_ty.bits() {
+                fx.ins().sextend(ptr_ty, raw_offset)
             } else {
                 raw_offset
             };
@@ -629,6 +664,8 @@ fn compile_inst(
         }
 
         InstKind::Undef => {
+            // todo: use something else
+
             let result_id = inst.result.unwrap();
             let dst_ty = def.get_type_of(result_id);
             let cl_ty = map_type(triple, dst_ty);
@@ -674,7 +711,7 @@ fn lower_cast(
                 fx.ins()
                     .bitcast(cl_dst, cranelift::prelude::MemFlags::new(), src)
             }
-            _ => src,
+           _ => panic!("unsupported bitcast: {src_ty:?} -> {dst_ty:?}"),
         },
         CastKind::SIToFP => fx.ins().fcvt_from_sint(cl_dst, src),
         CastKind::UIToFP => fx.ins().fcvt_from_uint(cl_dst, src),
